@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <meta name="theme-color" content="#fff3cf" />
+    <title>作品画廊 · ComfyUI 生图网关</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%96%BC%EF%B8%8F%3C/text%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="/style.css" />
+    <link rel="stylesheet" href="/gallery.css" />
+    <script
+      defer
+      src="https://umami.xxapi.icu/random-string.js"
+      data-website-id="0b4900ba-1ab9-442c-9dca-f2d1ea82ff36"
+    ></script>
+  </head>
+  <body class="gallery-body">
+    <main class="gallery-shell">
+      <header class="gallery-topbar">
+        <div>
+          <p class="eyebrow">GALLERY</p>
+          <h1 class="gallery-title">作品画廊</h1>
+          <p class="lede">看看大家发布的作品。点击缩略图可以查看大图与生成参数。</p>
+        </div>
+        <a class="gallery-home" href="/"><span aria-hidden="true">←</span> 返回首页</a>
+      </header>
+
+      <div class="gallery-toolbar">
+        <div class="gallery-filter-group">
+          <input id="gallery-search" class="gallery-search" type="search" maxlength="80" placeholder="搜索作品标题或作者" />
+          <select id="gallery-sort" class="gallery-select" aria-label="排序方式">
+            <option value="latest">最新发布</option>
+            <option value="likes">点赞最多</option>
+            <option value="comments">评论最多</option>
+            <option value="views">浏览最多</option>
+          </select>
+          <button id="gallery-liked-filter" class="secondary-button gallery-liked-filter" type="button" aria-pressed="false">我点赞过的</button>
+        </div>
+        <div class="gallery-toolbar-actions">
+          <span id="gallery-summary" class="gallery-info">—</span>
+          <button id="gallery-refresh" class="secondary-button" type="button">刷新</button>
+        </div>
+      </div>
+
+      <section id="gallery-grid" class="gallery-grid"></section>
+
+      <div class="gallery-pager">
+        <button id="gallery-prev" class="secondary-button" type="button">上一页</button>
+        <span id="gallery-page" class="gallery-info">—</span>
+        <button id="gallery-next" class="secondary-button" type="button">下一页</button>
+      </div>
+      <div id="gallery-message" class="message" role="status" aria-live="polite"></div>
+
+      <footer class="footer-note">作品由作者自行发布并确认合规。</footer>
+    </main>
+
+    <div id="gallery-viewer" class="gallery-viewer hidden" role="dialog" aria-modal="true" aria-labelledby="viewer-title" aria-hidden="true">
+      <div class="gallery-viewer-backdrop" data-viewer-close></div>
+      <div class="gallery-viewer-card">
+        <div class="gallery-viewer-head">
+          <div>
+            <p class="section-kicker">ARTWORK</p>
+            <h2 id="viewer-title">作品</h2>
+          </div>
+          <div class="gallery-viewer-head-actions">
+            <span class="gallery-like gallery-view-stat" aria-label="浏览量">
+              <span class="gallery-icon-host" data-gallery-icon="view" aria-hidden="true"></span>
+              <span id="viewer-view-count" class="gallery-view-count">0</span>
+            </span>
+            <button id="viewer-like" class="gallery-like" type="button" aria-pressed="false" aria-label="点赞">
+              <span class="gallery-icon-host" data-gallery-icon="heart" aria-hidden="true"></span>
+              <span id="viewer-like-count" class="gallery-like-count">0</span>
+            </button>
+            <button id="viewer-comment-jump" class="gallery-like gallery-comment-stat" type="button" aria-label="查看评论">
+              <span class="gallery-icon-host" data-gallery-icon="comment" aria-hidden="true"></span>
+              <span id="viewer-comment-count" class="gallery-comment-count">(0)</span>
+            </button>
+            <a id="viewer-download" class="gallery-like gallery-download" href="#" download>
+              <span class="gallery-icon-host" data-gallery-icon="download" aria-hidden="true"></span>
+              <span>下载原图</span>
+            </a>
+            <button id="viewer-report" class="gallery-like gallery-report-button" type="button" aria-label="举报作品" title="举报作品">
+              <span class="gallery-icon-host" data-gallery-icon="flag" aria-hidden="true"></span>
+            </button>
+            <button id="viewer-close" class="secondary-button" type="button">关闭</button>
+          </div>
+        </div>
+        <div class="gallery-viewer-body">
+          <img id="viewer-image" alt="作品大图" />
+          <div id="viewer-meta" class="gallery-viewer-meta"></div>
+          <section id="gallery-comments" class="gallery-comments">
+            <div class="gallery-comments-head">
+              <h3>评论 <span id="comments-total">(0)</span></h3>
+            </div>
+            <div id="comments-list" class="gallery-comments-list"></div>
+            <button id="comments-more" class="secondary-button gallery-comments-more hidden" type="button">加载更多评论</button>
+            <div id="comments-status" class="message" role="status" aria-live="polite"></div>
+            <form id="comment-form" class="comment-form">
+              <label for="comment-content">评论内容</label>
+              <textarea id="comment-content" class="comment-textarea" rows="4" maxlength="500" placeholder="写下你的评论（1-500 字，支持换行）"></textarea>
+              <div class="comment-form-row">
+                <span id="comment-length" class="comment-length">0 / 500</span>
+              </div>
+              <div class="comment-mode" role="radiogroup" aria-label="评论身份">
+                <label class="comment-radio"><input type="radio" name="comment-mode" value="anonymous" checked /> 匿名</label>
+                <label class="comment-radio"><input type="radio" name="comment-mode" value="named" /> 署名</label>
+              </div>
+              <div id="comment-nickname-wrap" class="comment-nickname-wrap hidden">
+                <label for="comment-nickname">昵称</label>
+                <input id="comment-nickname" type="text" maxlength="40" autocomplete="off" placeholder="显示昵称" />
+              </div>
+              <button id="comment-submit" class="primary-button" type="submit">
+                <span id="comment-submit-label">发布评论</span>
+                <span aria-hidden="true">→</span>
+              </button>
+              <div id="comment-form-message" class="message" role="status" aria-live="polite"></div>
+            </form>
+          </section>
+        </div>
+      </div>
+    </div>
+
+    <div id="gallery-report-modal" class="gallery-report-modal hidden" role="dialog" aria-modal="true" aria-labelledby="report-title" aria-hidden="true">
+      <div class="gallery-report-backdrop" data-report-close></div>
+      <div class="gallery-report-card">
+        <div class="gallery-report-head">
+          <div>
+            <p class="section-kicker">REPORT</p>
+            <h2 id="report-title">举报作品</h2>
+          </div>
+          <button id="report-close" class="secondary-button" type="button">关闭</button>
+        </div>
+        <p class="gallery-report-note">请说明问题，管理员会尽快处理。说明为选填，不会公开，也不会显示举报人身份。</p>
+        <label for="report-content">举报说明（选填，最多 500 字）</label>
+        <textarea id="report-content" rows="5" maxlength="500" placeholder="例如：图片内容不合规"></textarea>
+        <div id="report-message" class="message" role="status" aria-live="polite"></div>
+        <div class="gallery-report-actions">
+          <button id="report-cancel" class="secondary-button" type="button">取消</button>
+          <button id="report-submit" class="primary-button" type="button">提交举报</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="gallery-fullscreen" class="gallery-fullscreen hidden" role="dialog" aria-modal="true" aria-label="全屏查看作品" aria-hidden="true">
+      <div class="gallery-fullscreen-backdrop" data-fullscreen-close></div>
+      <img id="gallery-fullscreen-image" alt="全屏作品" />
+      <button id="gallery-fullscreen-close" class="gallery-fullscreen-close" type="button">关闭</button>
+    </div>
+
+    <script src="/gallery.js" defer></script>
+  </body>
+</html>

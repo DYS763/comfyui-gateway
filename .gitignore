@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+data/*.sqlite3
+data/*.sqlite3-*
+data/*.sqlite3.bak-*
+data/jobs/
+data/public/
+data/private/
+data/logs/
+data/keys.txt
+data/keys.txt.lock
+data/generated-keys-*.txt
+

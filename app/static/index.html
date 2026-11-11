@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <meta name="theme-color" content="#fff3cf" />
+    <title>ComfyUI 生图网关</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%96%BC%EF%B8%8F%3C/text%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="/style.css" />
+    <script
+      defer
+      src="https://umami.xxapi.icu/random-string.js"
+      data-website-id="0b4900ba-1ab9-442c-9dca-f2d1ea82ff36"
+    ></script>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">COMFYUI GATEWAY</p>
+          <h1><span class="title-emoji" aria-hidden="true">🖼️</span>ComfyUI 生图网关<span class="title-star" aria-hidden="true">★</span></h1>
+          <p class="lede">使用密钥提交生图任务。生成完成后请妥善保存取图密钥；任务可能需要排队，请稍后回来查看。</p>
+        </div>
+        <div class="status-stack">
+          <a id="account-entry" class="gallery-entry account-entry-button" href="/account" aria-label="账号中心">
+            <svg class="account-entry-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <circle cx="12" cy="8" r="3.6"></circle>
+              <path d="M4.5 20c.6-3.6 3.7-5.6 7.5-5.6s6.9 2 7.5 5.6"></path>
+            </svg>
+            <span id="account-entry-text">登录 / 注册</span>
+          </a>
+          <button id="service-status" class="status-dot status-button checking" type="button" aria-haspopup="dialog" aria-expanded="false">
+            <span class="status-dot-mark" aria-hidden="true"></span>
+            <span id="service-status-text" class="status-dot-text">正在检测服务…</span>
+          </button>
+          <span id="service-status-hint" class="status-hint hidden">当恢复时会按照排队顺序继续生图</span>
+          <div id="service-popover" class="service-popover hidden" role="dialog" aria-label="节点连接情况">
+            <div class="service-popover-head">
+              <strong>节点连接情况</strong>
+              <button id="service-popover-close" class="popover-close" type="button" aria-label="关闭节点连接情况">
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <path d="M6 6l12 12M18 6L6 18"></path>
+                </svg>
+              </button>
+            </div>
+            <p id="service-summary" class="service-summary">正在读取节点…</p>
+            <div id="service-node-list" class="service-node-list"></div>
+          </div>
+        </div>
+      </header>
+
+      <section class="skill-banner" aria-labelledby="skill-title">
+        <div class="skill-copy">
+          <p class="section-kicker">提示词助手</p>
+          <h2 id="skill-title">不知道怎么写提示词？让AI帮你！</h2>
+          <p>下载这个 skill 并交给你的 AI 助手，然后描述你想要的画面即可。</p>
+        </div>
+        <a class="skill-download" href="/download/image-prompt-skill.md" download="image-prompt-skill.md">
+          <span class="skill-icon" aria-hidden="true">↓</span>
+          <span><strong>下载 skill</strong><small>image-prompt-skill.md</small></span>
+        </a>
+      </section>
+
+      <section class="grid">
+        <article class="panel submit-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="section-kicker">01 / 生图</p>
+              <h2>提交生图任务</h2>
+            </div>
+            <span class="badge">单次生图预计6~8分钟</span>
+          </div>
+          <form id="submit-form">
+            <div id="free-notice" class="free-notice">
+              <span class="free-notice-badge">完全免费</span>
+              <p>本站完全免费：生图密钥由管理员发放，不存在任何付费、充值或购买渠道，请勿相信任何第三方售卖或充值渠道。</p>
+              <button id="free-notice-ack" class="secondary-button free-notice-ack" type="button">我已了解</button>
+            </div>
+
+            <section class="submit-section">
+              <div class="submit-section-head">
+                <p class="section-kicker">A / 凭据</p>
+                <h3>账号额度与生图密钥</h3>
+                <p>使用管理员发放的密钥，或登录后勾选账号额度。</p>
+              </div>
+              <label for="access-key" id="access-key-label">发放密钥</label>
+              <input id="access-key" name="key" type="password" autocomplete="off" placeholder="粘贴一次性密钥或超级密钥" required />
+              <label id="account-quota-row" class="account-quota-toggle hidden">
+                <input id="use-account-quota" type="checkbox" />
+                <span>使用账号额度</span>
+              </label>
+              <div id="account-quota-hint" class="field-meta hidden">
+                <span>免费额度剩余 <b id="quota-free">—</b></span>
+                <span>账号额度剩余 <b id="quota-paid">—</b></span>
+                <span><a href="/account">账号中心</a></span>
+              </div>
+            </section>
+
+            <section class="submit-section">
+              <div class="submit-section-head">
+                <p class="section-kicker">B / 节点</p>
+                <h3>生成节点</h3>
+                <p>默认自动分配；指定节点后需要等该节点上线。</p>
+              </div>
+              <label for="endpoint-select">生成节点</label>
+              <select id="endpoint-select" name="endpoint_id"></select>
+              <div class="field-meta"><span>默认自动分配。指定节点后，需要等该节点上线后才能继续生图；不同节点的生图质量一致，只有生成速度快慢的区别。</span></div>
+            </section>
+
+            <section class="submit-section">
+              <div class="submit-section-head">
+                <p class="section-kicker">C / 提示词</p>
+                <h3>描述你想生成的画面</h3>
+                <p>普通模式直接填写提示词；专家模式在高级选项里填写 layout JSON。</p>
+              </div>
+              <div id="prompt-block">
+                <label for="prompt">正向提示词</label>
+                <textarea id="prompt" name="prompt" maxlength="8000" rows="10" required></textarea>
+                <div class="field-meta"><span>仅接受文本，推荐在默认提示词的后边添加您想要的提示词。</span><span id="prompt-count">0 / 8000</span></div>
+              </div>
+            </section>
+
+            <section class="submit-section submit-section-advanced">
+              <div class="submit-section-head">
+                <p class="section-kicker">D / 高级选项</p>
+                <h3>参数与专家模式</h3>
+                <p>普通用户按默认配置即可，以下选项按需开启。</p>
+              </div>
+              <label class="advanced-toggle" for="advanced-toggle">
+                <input id="advanced-toggle" type="checkbox" aria-controls="advanced-fields" aria-expanded="false" />
+                <span>启用高级功能</span>
+              </label>
+
+              <label class="advanced-toggle" for="expert-toggle">
+                <input id="expert-toggle" type="checkbox" aria-controls="advanced-fields layout-fields" aria-expanded="false" />
+                <span>启用专家模式（MOSS Layout JSON）</span>
+              </label>
+
+              <div id="advanced-fields" class="advanced-fields hidden" aria-hidden="true">
+              <p class="advanced-note">高级功能仅适用于高级用户，普通用户建议按照默认配置使用。</p>
+              <label for="negative-prompt">负面提示词</label>
+              <textarea id="negative-prompt" name="negative_prompt" maxlength="8000" rows="4" placeholder="留空则使用内置默认负面提示词" disabled></textarea>
+              <div class="field-meta"><span>留空则使用内置默认负面提示词。</span><span id="negative-count">0 / 8000</span></div>
+              <label for="steps">生成步数</label>
+              <input id="steps" name="steps" type="number" min="3" max="70" step="1" value="50" inputmode="numeric" required disabled />
+              <div class="field-meta"><span>可调范围 3~70，默认 50。步数越高通常耗时越长。</span></div>
+              <p class="advanced-subtitle">图片分辨率</p>
+              <div class="size-grid">
+                <div>
+                  <label for="width">宽度</label>
+                  <input id="width" name="width" type="number" min="16" max="1920" step="16" value="1024" inputmode="numeric" disabled />
+                </div>
+                <div>
+                  <label for="height">高度</label>
+                  <input id="height" name="height" type="number" min="16" max="1920" step="16" value="1024" inputmode="numeric" disabled />
+                </div>
+              </div>
+              <div class="field-meta"><span>默认 1024×1024，最大 1920；输入后自动按 16 的倍数取整。</span></div>
+              <label for="seed">生图种子</label>
+              <input id="seed" name="seed" type="number" min="0" max="9007199254740991" step="1" inputmode="numeric" placeholder="留空则每次随机" disabled />
+              <div class="field-meta"><span>留空则服务端随机生成；填写相同种子可复现同一结果。</span></div>
+              <label for="lora-select">LoRA</label>
+              <select id="lora-select" name="lora_id" disabled></select>
+              <div class="field-meta"><span>默认使用模板内置 LoRA；选择“不使用 LoRA”可在本次生成中跳过。</span></div>
+              <label for="lora-strength">LoRA 强度</label>
+              <input id="lora-strength" name="lora_strength" type="number" min="0" max="2" step="0.01" value="1" inputmode="decimal" disabled />
+              <div class="field-meta"><span>范围 0~2，默认 1；选择“不使用 LoRA”时不生效。</span></div>
+            </div>
+
+            <div id="layout-fields" class="layout-fields hidden" aria-hidden="true">
+              <p class="advanced-note">专家模式会把下面的 JSON 直接作为 MOSS-Image 正向提示词发送；普通提示词输入框将被隐藏。</p>
+              <label for="layout-json">MOSS Layout JSON</label>
+              <textarea id="layout-json" class="layout-json" rows="14" maxlength="32768" placeholder="粘贴官方 MOSS-Image layout JSON" disabled></textarea>
+              <div class="field-meta"><span>最多 32768 字符；文本编码器单次上限 4096 token（约 3900 个中文字符），超出会被拒绝，请精简 caption/text/items。</span><span id="layout-count">0 / 32768</span></div>
+              <div class="layout-help">
+                <p><strong>使用说明</strong></p>
+                <ul>
+                  <li><code>bbox_format</code> 固定为 <code>yxyx</code>；<code>bbox_coord_space</code> 固定为 <code>abs_centralized</code>。</li>
+                  <li>bbox 顺序为 <code>[y_min, x_min, y_max, x_max]</code>，以画布中心为原点；1024×1024 时范围是 -512~512。</li>
+                  <li><code>label</code> 只能是 <code>object</code>、<code>character</code>、<code>text</code>；text 元素必须填写 <code>text</code>。</li>
+                  <li>宽高不写在 JSON 里，使用上面的分辨率；修改分辨率后必须重新计算 bbox。</li>
+                  <li>不支持 weight、区域负向提示词；负向提示词请单独填写。最多 64 个 items（网关防御上限，官方节点不限数量；实际受 4096 token 预算约束），JSON 最多 32768 字符；每个 summary.caption、items[].caption、items[].text 最多 3900 字符；文本编码器单次上限 4096 token，超出会被拒绝，请精简 summary.caption、items[].caption/text、tags/palette 或减少 items。</li>
+                  <li>框是放置标注，不保证严格边界；建议文字框四周留出 padding。</li>
+                </ul>
+              </div>
+              <div class="layout-actions">
+                <button id="layout-example" class="secondary-button" type="button" disabled>填入示例</button>
+                <button id="layout-clear" class="secondary-button" type="button" disabled>清空</button>
+              </div>
+            </div>
+
+            </section>
+
+            <div class="submit-actions">
+              <p class="submit-hint">提交后可凭查询令牌取图。登录状态下令牌会自动保存到账号，保留 7 天。</p>
+              <button class="primary-button" type="submit"><span>提交到队列</span><span aria-hidden="true">→</span></button>
+            </div>
+          </form>
+          <div id="submit-message" class="message" role="status" aria-live="polite"></div>
+          <div id="token-reveal" class="token-reveal hidden">
+            <div class="token-heading"><span>查询令牌</span><span class="one-time">仅显示在这里</span></div>
+            <code id="query-token"></code>
+            <div class="token-actions">
+              <button id="copy-token" class="secondary-button" type="button">复制令牌</button>
+              <button id="copy-query-link" class="secondary-button" type="button">复制查询链接</button>
+              <button id="download-token" class="secondary-button" type="button">下载凭证</button>
+            </div>
+          </div>
+        </article>
+
+        <article class="panel query-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="section-kicker">02 / 取图</p>
+              <h2>查询任务</h2>
+            </div>
+            <div class="query-panel-actions">
+              <a class="gallery-entry" href="/gallery">作品画廊 <span aria-hidden="true">→</span></a>
+              <span class="badge neutral">未发布至画廊的图像仅保留24小时</span>
+            </div>
+          </div>
+          <form id="query-form">
+            <label for="query-token-input">查询令牌</label>
+            <input id="query-token-input" name="token" type="text" autocomplete="off" placeholder="粘贴查询令牌，或使用带 #token 的链接" required />
+            <button class="outline-button" type="submit"><span>查询状态</span><span aria-hidden="true">↗</span></button>
+          </form>
+          <button id="saved-keys-toggle" class="secondary-button saved-keys-toggle" type="button" aria-controls="saved-keys-panel" aria-expanded="false">
+            本机保存的取图密钥 <span id="saved-keys-count" class="saved-keys-count">0</span>
+          </button>
+          <section id="saved-keys-panel" class="saved-keys-panel hidden" aria-hidden="true">
+            <div class="saved-keys-head">
+              <div>
+                <p class="section-kicker">本机记录</p>
+                <h3>本机保存的取图密钥</h3>
+              </div>
+              <div class="saved-keys-actions">
+                <button id="saved-keys-clear" class="secondary-button" type="button">清空</button>
+                <button id="saved-keys-close" class="secondary-button" type="button">收起</button>
+              </div>
+            </div>
+            <p class="saved-keys-note">只保存在当前浏览器，不上传服务器；最多保留 20 条，过期超过 7 天自动清理。</p>
+            <div id="saved-keys-list" class="saved-keys-list"></div>
+            <div id="saved-keys-message" class="message" role="status" aria-live="polite"></div>
+          </section>
+          <div id="query-message" class="message" role="status" aria-live="polite"></div>
+          <div id="task-card" class="task-card hidden">
+            <div class="task-topline"><span id="task-status" class="state-pill">排队中</span><span id="task-id" class="task-id"></span></div>
+            <div class="queue-number"><span id="queue-label">前面还有</span><strong id="queue-position">-</strong><span id="queue-suffix">个任务</span></div>
+            <dl class="task-meta">
+              <div><dt>提交时间</dt><dd id="created-at">-</dd></div>
+              <div><dt>取图截止</dt><dd id="expires-at">-</dd></div>
+              <div><dt>生成节点</dt><dd id="task-node">-</dd></div>
+              <div><dt>LoRA</dt><dd id="task-lora">-</dd></div>
+            </dl>
+            <div id="result-area" class="result-area hidden">
+              <img id="result-image" alt="生成结果" />
+              <a id="download-result" class="download-link" download="generated-image.png">下载图片 <span aria-hidden="true">↓</span></a>
+              <button id="gallery-add" class="gallery-add-button hidden" type="button">加入图库</button>
+              <button id="publish-result" class="publish-button" type="button">发布至画廊</button>
+              <button id="destroy-result" class="destroy-button" type="button">销毁图片</button>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <footer class="footer-note">查询令牌是唯一的取图凭证。请谨慎保管。</footer>
+    </main>
+
+    <div id="publish-modal" class="publish-modal hidden" role="dialog" aria-modal="true" aria-labelledby="publish-title" aria-hidden="true">
+      <div class="publish-modal-backdrop" data-publish-close></div>
+      <div class="publish-modal-card">
+        <div class="publish-modal-head">
+          <div>
+            <p class="section-kicker">PUBLISH</p>
+            <h2 id="publish-title">发布至画廊</h2>
+          </div>
+          <button id="publish-cancel" class="secondary-button" type="button">取消</button>
+        </div>
+        <p class="publish-modal-note">发布后不可撤销。作品名称与作者均为选填，留空会显示为“未命名作品 / 匿名”。</p>
+        <p class="publish-modal-note publish-space-note">为节约服务器空间，发布的同时会销毁取图的图像。</p>
+        <label for="publish-work-name">作品名称（选填）</label>
+        <input id="publish-work-name" type="text" maxlength="80" autocomplete="off" placeholder="给作品起个名字" />
+        <label for="publish-author">作者（选填）</label>
+        <input id="publish-author" type="text" maxlength="80" autocomplete="off" placeholder="署名或昵称" />
+        <button id="publish-confirm" class="primary-button" type="button"><span>确认发布</span><span aria-hidden="true">→</span></button>
+        <div id="publish-message" class="message" role="status" aria-live="polite"></div>
+      </div>
+    </div>
+
+    <div id="gallery-modal" class="publish-modal hidden" role="dialog" aria-modal="true" aria-labelledby="gallery-modal-title" aria-hidden="true">
+      <div class="publish-modal-backdrop" data-gallery-close></div>
+      <div class="publish-modal-card gallery-picker-card">
+        <div class="publish-modal-head">
+          <div>
+            <p class="section-kicker">PRIVATE GALLERY</p>
+            <h2 id="gallery-modal-title">加入图库</h2>
+          </div>
+          <button id="gallery-cancel" class="secondary-button" type="button">关闭</button>
+        </div>
+        <p class="publish-modal-note">选择要加入的私人图库。加入后可在账号中心查看，图片会占用私库容量。</p>
+        <p id="gallery-usage" class="gallery-usage"></p>
+        <div id="gallery-options" class="gallery-options" role="radiogroup" aria-label="选择私人图库"></div>
+        <div id="gallery-empty" class="gallery-empty hidden">
+          <strong>还没有图库</strong>
+          <span>先新建一个图库，创建成功后可以直接把这张图片加进去。</span>
+        </div>
+        <div class="gallery-create-row">
+          <label for="gallery-new-name">新建图库</label>
+          <div class="gallery-create-controls">
+            <input id="gallery-new-name" type="text" maxlength="40" autocomplete="off" placeholder="图库名称（最多 40 字）" />
+            <button id="gallery-create" class="secondary-button" type="button">新建并加入</button>
+          </div>
+        </div>
+        <button id="gallery-confirm" class="primary-button" type="button"><span>加入所选图库</span><span aria-hidden="true">→</span></button>
+        <div id="gallery-message" class="message" role="status" aria-live="polite"></div>
+      </div>
+    </div>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>
+

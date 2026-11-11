@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <meta name="theme-color" content="#fff3cf" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>管理员登录 · ComfyUI 生图网关</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%90%3C/text%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="/style.css" />
+    <link rel="stylesheet" href="/admin.css" />
+  </head>
+  <body class="admin-body">
+    <main class="admin-login-shell">
+      <section class="admin-login-card">
+        <p class="section-kicker">ADMIN ONLY</p>
+        <h1 class="admin-login-title">管理台登录</h1>
+        <p class="admin-login-note">该入口仅限管理员使用，账号与密码由服务端环境变量配置。</p>
+        <form id="admin-login-form" method="post" autocomplete="off">
+          <label for="admin-username">管理员账号</label>
+          <input id="admin-username" name="username" type="text" autocomplete="username" maxlength="128" required />
+          <label for="admin-password">管理员密码</label>
+          <input id="admin-password" name="password" type="password" autocomplete="current-password" maxlength="512" required />
+          <button class="primary-button" type="submit"><span>登录</span><span aria-hidden="true">→</span></button>
+        </form>
+        <div id="admin-login-message" class="message" role="status" aria-live="polite"></div>
+        <p class="admin-login-foot">登录会话保存在服务端内存中，服务重启后需要重新登录。</p>
+      </section>
+    </main>
+    <script src="/adminlogin.js" defer></script>
+  </body>
+</html>

@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <meta name="theme-color" content="#fff3cf" />
+    <title>账号中心 · ComfyUI 生图网关</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%96%BC%EF%B8%8F%3C/text%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="/style.css" />
+    <link rel="stylesheet" href="/account.css" />
+    <link rel="stylesheet" href="/share.css" />
+  </head>
+  <body class="account-body">
+    <main class="shell account-shell">
+      <header class="topbar account-topbar">
+        <div>
+          <p class="eyebrow">ACCOUNT</p>
+          <h1 class="account-title">账号中心<span class="title-star" aria-hidden="true">★</span></h1>
+          <p class="lede">查看三桶额度与流水、兑换额度、管理私人图库和取图密钥。</p>
+        </div>
+        <nav class="account-nav" aria-label="账号导航">
+          <a class="gallery-entry" href="/"><span aria-hidden="true">←</span> 返回首页</a>
+          <a class="gallery-entry" href="/gallery">作品画廊 <span aria-hidden="true">→</span></a>
+          <button id="logout-button" type="button" class="secondary-button account-logout hidden">退出登录</button>
+        </nav>
+      </header>
+
+      <section class="free-notice account-free-notice">
+        <span class="free-notice-badge">完全免费</span>
+        <p>本站完全免费：生图密钥由管理员发放，不存在任何付费、充值或购买渠道，请勿相信任何第三方售卖或充值渠道。</p>
+      </section>
+
+      <section id="auth-block" class="panel account-card hidden" aria-labelledby="auth-title">
+        <div class="panel-heading">
+          <div>
+            <p class="section-kicker">SIGN IN</p>
+            <h2 id="auth-title">登录 / 注册</h2>
+          </div>
+          <span class="badge">邀请码注册</span>
+        </div>
+        <p class="account-note">登录后可查看额度、流水与私人图库。没有账号？使用管理员发放的邀请码注册。</p>
+        <form id="login-form" class="account-form">
+          <label for="login-username">用户名</label>
+          <input id="login-username" name="username" autocomplete="username" required />
+          <label for="login-password">密码</label>
+          <input id="login-password" name="password" type="password" autocomplete="current-password" required />
+          <button type="submit" class="primary-button account-submit">
+            <span>登录</span><span aria-hidden="true">→</span>
+          </button>
+        </form>
+        <p class="account-divider"><span>或使用邀请码注册</span></p>
+        <form id="register-form" class="account-form">
+          <label for="register-invite">邀请码</label>
+          <input id="register-invite" name="invite_code" placeholder="inv_..." required />
+          <label for="register-username">用户名</label>
+          <input id="register-username" name="username" autocomplete="username" required />
+          <label for="register-password">密码（8~128 位）</label>
+          <input id="register-password" name="password" type="password" required />
+          <button type="submit" class="outline-button account-submit">
+            <span>注册并登录</span><span aria-hidden="true">→</span>
+          </button>
+        </form>
+        <div id="auth-message" class="message" role="status" aria-live="polite"></div>
+      </section>
+
+      <section id="account-block" class="hidden">
+        <section class="panel account-card account-overview" aria-labelledby="account-name">
+          <div class="panel-heading account-head">
+            <div>
+              <p class="section-kicker">BALANCE</p>
+              <h2 id="account-name">—</h2>
+              <p id="account-meta" class="account-note"></p>
+            </div>
+            <a href="/" class="gallery-entry">去生图 <span aria-hidden="true">→</span></a>
+          </div>
+          <div class="account-balances">
+            <div class="account-balance">
+              <span class="account-balance-label">免费额度剩余</span>
+              <strong id="balance-free">—</strong>
+              <span id="balance-free-note" class="account-note"></span>
+            </div>
+            <div class="account-balance">
+              <span class="account-balance-label">奖励额度</span>
+              <strong id="balance-bonus">—</strong>
+            </div>
+            <div class="account-balance">
+              <span class="account-balance-label">兑换额度</span>
+              <strong id="balance-paid">—</strong>
+            </div>
+          </div>
+        </section>
+
+        <div class="account-layout">
+          <section class="panel account-card account-ledger" aria-labelledby="ledger-title">
+            <div class="account-section-head">
+              <div>
+                <p class="section-kicker">LEDGER</p>
+                <h2 id="ledger-title">额度流水</h2>
+              </div>
+              <span class="badge neutral">最近 100 条</span>
+            </div>
+            <div class="account-table-wrap">
+              <table class="account-table">
+                <thead>
+                  <tr><th>时间</th><th>类型</th><th>桶</th><th>变动</th><th>变动后</th><th>备注</th></tr>
+                </thead>
+                <tbody id="ledger-rows"></tbody>
+              </table>
+            </div>
+            <div id="ledger-pager" class="account-pagination hidden">
+              <button id="ledger-prev" class="secondary-button" type="button">上一页</button>
+              <span id="ledger-page" class="account-pagination-label">第 1 / 1 页</span>
+              <button id="ledger-next" class="secondary-button" type="button">下一页</button>
+            </div>
+            <div id="ledger-message" class="message" role="status" aria-live="polite"></div>
+          </section>
+
+          <section class="panel account-card account-tokens-card" aria-labelledby="tokens-title">
+            <div class="account-section-head">
+              <div>
+                <p class="section-kicker">TOKENS</p>
+                <h2 id="tokens-title">取图密钥</h2>
+              </div>
+              <span id="account-token-retention" class="badge neutral">保留 7 天</span>
+            </div>
+            <p class="account-note">登录后生成的任务会自动记录在这里；本机记录仍只存在当前浏览器。账号记录保留 7 天，不影响任务本身的 42 小时取图窗口。</p>
+            <h3 class="account-subheading">账号记录</h3>
+            <form id="account-token-search" class="account-form account-inline account-token-search" role="search">
+              <input id="account-token-search-input" type="search" maxlength="200" placeholder="按取图密钥或任务 ID 搜索" aria-label="搜索账号取图记录" />
+              <button type="submit" class="outline-button account-inline-button">搜索</button>
+              <button id="account-token-search-clear" class="secondary-button account-inline-button" type="button">清空</button>
+            </form>
+            <div id="account-token-list" class="account-tokens"></div>
+            <div id="account-token-pager" class="account-pagination hidden">
+              <button id="account-token-prev" class="secondary-button" type="button">上一页</button>
+              <span id="account-token-page" class="account-pagination-label">第 1 / 1 页</span>
+              <button id="account-token-next" class="secondary-button" type="button">下一页</button>
+            </div>
+            <div id="account-token-message" class="message" role="status" aria-live="polite"></div>
+            <h3 class="account-subheading">本机记录</h3>
+            <div id="local-token-list" class="account-tokens"></div>
+            <div id="local-token-message" class="message" role="status" aria-live="polite"></div>
+          </section>
+
+          <section class="panel account-card account-gallery-card" aria-labelledby="gallery-title">
+            <div class="account-section-head">
+              <div>
+                <p class="section-kicker">PRIVATE GALLERY</p>
+                <h2 id="gallery-title">私人图库</h2>
+              </div>
+              <span class="badge neutral">仅展示图</span>
+            </div>
+            <p class="account-note">加入私库只保存展示图，保留 30 天，不消耗生图额度。每个账号最多 10 个图库、300 张、200MB。点击图库即可查看图片并管理。</p>
+            <form id="gallery-form" class="account-form account-inline">
+              <input id="gallery-name" placeholder="图库名称（1~40 字）" maxlength="40" aria-label="图库名称" required />
+              <button type="submit" class="outline-button account-inline-button">新建图库</button>
+            </form>
+            <div id="gallery-list" class="account-galleries"></div>
+            <div id="gallery-message" class="message" role="status" aria-live="polite"></div>
+          </section>
+
+          <section class="panel account-card account-exchange-card" aria-labelledby="recharge-title">
+            <div class="account-section-head">
+              <div>
+                <p class="section-kicker">EXCHANGE</p>
+                <h2 id="recharge-title">兑换额度</h2>
+              </div>
+              <span class="badge">管理员发放</span>
+            </div>
+            <p class="account-note">粘贴管理员发放的兑换密钥（recharge_ 开头），兑换后计入兑换额度。</p>
+            <form id="recharge-form" class="account-form account-inline">
+              <input id="recharge-key" placeholder="recharge_..." autocomplete="off" aria-label="兑换密钥" required />
+              <button type="submit" class="outline-button account-inline-button">兑换</button>
+            </form>
+            <div id="recharge-message" class="message" role="status" aria-live="polite"></div>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <div id="gallery-detail" class="publish-modal hidden" role="dialog" aria-modal="true" aria-labelledby="gallery-detail-title" aria-hidden="true">
+      <div class="publish-modal-backdrop" data-gallery-detail-close></div>
+      <div class="publish-modal-card account-gallery-modal">
+        <div class="publish-modal-head">
+          <div>
+            <p class="section-kicker">PRIVATE GALLERY</p>
+            <h2 id="gallery-detail-title">图库</h2>
+          </div>
+          <button id="gallery-detail-close" class="secondary-button" type="button">关闭</button>
+        </div>
+        <p id="gallery-detail-meta" class="publish-modal-note"></p>
+        <div class="account-gallery-tools">
+          <label for="gallery-rename-input">重命名图库</label>
+          <div class="account-gallery-rename">
+            <input id="gallery-rename-input" type="text" maxlength="40" autocomplete="off" />
+            <button id="gallery-rename" class="secondary-button" type="button">保存名称</button>
+          </div>
+        </div>
+        <div class="account-gallery-share-block">
+          <p id="gallery-share-state" class="account-gallery-share">未分享</p>
+          <div class="account-gallery-actions">
+            <button id="gallery-share-create" type="button">创建分享</button>
+            <button id="gallery-share-copy" class="hidden" type="button">复制链接</button>
+            <button id="gallery-share-revoke" class="hidden" type="button">撤销分享</button>
+          </div>
+        </div>
+        <div id="gallery-detail-grid" class="share-grid account-gallery-grid"></div>
+        <div id="gallery-detail-empty" class="account-empty hidden">图库中还没有图片。可在取图页用「加入图库」添加。</div>
+        <button id="gallery-delete" class="destroy-button" type="button">删除整个图库</button>
+        <div id="gallery-detail-message" class="message" role="status" aria-live="polite"></div>
+      </div>
+    </div>
+
+    <script src="/account.js"></script>
+  </body>
+</html>

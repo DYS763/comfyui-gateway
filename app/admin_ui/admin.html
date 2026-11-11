@@ -1,0 +1,703 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <meta name="theme-color" content="#fff3cf" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>管理台 · ComfyUI 生图网关</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%90%3C/text%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="/style.css" />
+    <link rel="stylesheet" href="/admin.css" />
+  </head>
+  <body class="admin-body">
+    <main class="admin-shell">
+      <header class="admin-topbar">
+        <div>
+          <p class="section-kicker">ADMIN CONSOLE</p>
+          <h1 class="admin-title">ComfyUI 管理台</h1>
+          <p class="lede">统一查看任务、密钥、审计日志与运行状态。</p>
+        </div>
+        <div class="admin-session">
+          <span id="admin-user" class="admin-user">—</span>
+          <button id="admin-logout" class="secondary-button" type="button">退出登录</button>
+        </div>
+      </header>
+
+      <section class="admin-stats">
+        <div class="admin-stat"><span>任务总数</span><strong id="stat-total">—</strong></div>
+        <div class="admin-stat"><span>排队 / 生成</span><strong id="stat-active">—</strong></div>
+        <div class="admin-stat"><span>已完成</span><strong id="stat-completed">—</strong></div>
+        <div class="admin-stat"><span>失败 / 过期</span><strong id="stat-bad">—</strong></div>
+        <div class="admin-stat"><span>未用密钥</span><strong id="stat-keys">—</strong></div>
+        <div class="admin-stat"><span>图片占用</span><strong id="stat-disk">—</strong></div>
+      </section>
+
+      <nav class="admin-tabs" role="tablist">
+        <button class="admin-tab active" data-tab="tasks" role="tab" aria-selected="true">任务</button>
+        <button class="admin-tab" data-tab="works" role="tab" aria-selected="false">公开画廊</button>
+        <button class="admin-tab" data-tab="stats" role="tab" aria-selected="false">网站统计</button>
+        <button class="admin-tab" data-tab="visitors" role="tab" aria-selected="false">访客行为</button>
+        <button class="admin-tab" data-tab="comments" role="tab" aria-selected="false">评论管理</button>
+        <button class="admin-tab" data-tab="reports" role="tab" aria-selected="false">举报<span id="reports-badge" class="admin-tab-badge hidden">0</span></button>
+        <button class="admin-tab" data-tab="keys" role="tab" aria-selected="false">密钥</button>
+        <button class="admin-tab" data-tab="accounts" role="tab" aria-selected="false">账号</button>
+        <button class="admin-tab" data-tab="invites" role="tab" aria-selected="false">邀请码</button>
+        <button class="admin-tab" data-tab="recharge" role="tab" aria-selected="false">兑换密钥</button>
+        <button class="admin-tab" data-tab="superkeys" role="tab" aria-selected="false">超级密钥</button>
+        <button class="admin-tab" data-tab="nodes" role="tab" aria-selected="false">节点</button>
+        <button class="admin-tab" data-tab="loras" role="tab" aria-selected="false">LoRA</button>
+        <button class="admin-tab" data-tab="ratelimit" role="tab" aria-selected="false">限流豁免</button>
+        <button class="admin-tab" data-tab="audit" role="tab" aria-selected="false">日志</button>
+        <button class="admin-tab" data-tab="system" role="tab" aria-selected="false">系统</button>
+      </nav>
+
+      <section class="admin-panel active" id="panel-tasks">
+        <div class="admin-toolbar">
+          <select id="task-status-filter" class="admin-select">
+            <option value="">全部状态</option>
+            <option value="queued">queued</option>
+            <option value="waiting_node">waiting_node</option>
+            <option value="submitted">submitted</option>
+            <option value="running">running</option>
+            <option value="completed">completed</option>
+            <option value="failed">failed</option>
+            <option value="expired">expired</option>
+          </select>
+          <select id="task-endpoint-filter" class="admin-select">
+            <option value="">全部节点</option>
+          </select>
+          <input id="task-search" class="admin-search" type="search" maxlength="200" placeholder="搜索任务 ID / 提示词 / ComfyUI prompt ID" />
+          <button id="task-refresh" class="secondary-button" type="button">刷新</button>
+          <button id="task-retry" class="secondary-button" type="button" disabled>重试</button>
+          <button id="queue-toggle" class="secondary-button" type="button">暂停队列</button>
+          <span id="queue-state" class="admin-page-info">—</span>
+        </div>
+        <div class="admin-table-wrap">
+          <table class="admin-table">
+            <thead>
+              <tr><th>任务</th><th>状态</th><th>提示词</th><th>节点</th><th>步数</th><th>取图</th><th>创建时间</th><th></th></tr>
+            </thead>
+            <tbody id="task-rows"></tbody>
+          </table>
+        </div>
+        <div class="admin-pager">
+          <button id="task-prev" class="secondary-button" type="button">上一页</button>
+          <span id="task-page" class="admin-page-info">—</span>
+          <button id="task-next" class="secondary-button" type="button">下一页</button>
+        </div>
+        <div id="task-message" class="message" role="status" aria-live="polite"></div>
+        <div id="task-detail" class="admin-detail hidden"></div>
+      </section>
+
+      <section class="admin-panel" id="panel-works">
+        <div class="admin-toolbar">
+          <select id="work-status-filter" class="admin-select">
+            <option value="">全部公开作品</option>
+            <option value="active">展示中</option>
+            <option value="removed">已下架</option>
+          </select>
+          <input id="work-search" class="admin-search" type="search" maxlength="100" placeholder="搜索作品名 / 作者 / 作品 ID" />
+          <button id="work-refresh" class="secondary-button" type="button">刷新</button>
+          <a class="secondary-button admin-link-button" href="/gallery" target="_blank" rel="noreferrer">打开公开画廊 ↗</a>
+        </div>
+        <div class="admin-table-wrap">
+          <table class="admin-table admin-works-table">
+            <thead>
+              <tr><th>缩略图</th><th>作品</th><th>作者</th><th>发布时间</th><th>发布 IP</th><th>状态</th><th>操作</th></tr>
+            </thead>
+            <tbody id="work-rows"></tbody>
+          </table>
+        </div>
+        <div class="admin-pager">
+          <button id="work-prev" class="secondary-button" type="button">上一页</button>
+          <span id="work-page" class="admin-page-info">—</span>
+          <button id="work-next" class="secondary-button" type="button">下一页</button>
+        </div>
+        <div id="work-summary" class="admin-page-info"></div>
+        <div id="work-message" class="message" role="status" aria-live="polite"></div>
+      </section>
+
+      <section class="admin-panel" id="panel-stats">
+        <div class="admin-toolbar">
+          <select id="stats-days" class="admin-select">
+            <option value="7">最近 7 天</option>
+            <option value="14" selected>最近 14 天</option>
+            <option value="30">最近 30 天</option>
+            <option value="90">最近 90 天</option>
+          </select>
+          <button id="stats-refresh" class="secondary-button" type="button">刷新</button>
+        </div>
+        <div class="admin-stats admin-site-stats">
+          <div class="admin-stat"><span>总浏览量</span><strong id="site-stat-pv">—</strong></div>
+          <div class="admin-stat"><span>总访客</span><strong id="site-stat-uv">—</strong></div>
+          <div class="admin-stat"><span>今日浏览</span><strong id="site-stat-today-pv">—</strong></div>
+          <div class="admin-stat"><span>今日访客</span><strong id="site-stat-today-uv">—</strong></div>
+          <div class="admin-stat"><span>画廊图片浏览</span><strong id="site-stat-gallery">—</strong></div>
+          <div class="admin-stat"><span>浏览过的作品</span><strong id="site-stat-gallery-works">—</strong></div>
+        </div>
+        <h2 class="admin-section-title">按日访问</h2>
+        <div class="admin-table-wrap">
+          <table class="admin-table admin-stats-table">
+            <thead>
+              <tr><th>日期</th><th>浏览量</th><th>独立访客</th><th>趋势</th></tr>
+            </thead>
+            <tbody id="site-daily-rows"></tbody>
+          </table>
+        </div>
+        <h2 class="admin-section-title">页面排行</h2>
+        <div class="admin-table-wrap">
+          <table class="admin-table admin-stats-table">
+            <thead>
+              <tr><th>页面</th><th>浏览量</th><th>独立访客</th></tr>
+            </thead>
+            <tbody id="site-page-rows"></tbody>
+          </table>
+        </div>
+        <h2 class="admin-section-title">最近访问</h2>
+        <div class="admin-table-wrap">
+          <table class="admin-table admin-stats-table">
+            <thead>
+              <tr><th>时间</th><th>页面</th><th>访客 ID</th><th>客户端 IP</th></tr>
+            </thead>
+            <tbody id="site-recent-rows"></tbody>
+          </table>
+        </div>
+        <div id="stats-message" class="message" role="status" aria-live="polite"></div>
+      </section>
+
+      <section class="admin-panel" id="panel-visitors">
+        <div class="admin-toolbar">
+          <input id="visitor-filter" class="admin-search" type="text" maxlength="64" placeholder="粘贴完整访客 ID" />
+          <select id="visitor-action-filter" class="admin-select">
+            <option value="">全部动作</option>
+            <option value="task.submitted">生成提交</option>
+            <option value="image.retrieved">取图</option>
+            <option value="image.published">发布至画廊</option>
+            <option value="image.destroyed">销毁图片</option>
+            <option value="gallery.liked">点赞</option>
+            <option value="gallery.unliked">取消点赞</option>
+            <option value="gallery.commented">评论</option>
+          </select>
+          <button id="visitor-refresh" class="secondary-button" type="button">刷新</button>
+        </div>
+        <div class="admin-table-wrap">
+          <table class="admin-table admin-visitor-table">
+            <thead>
+              <tr><th>时间</th><th>访客 ID</th><th>动作</th><th>关联任务 / 作品</th><th>客户端 IP</th></tr>
+            </thead>
+            <tbody id="visitor-rows"></tbody>
+          </table>
+        </div>
+        <div class="admin-pager">
+          <button id="visitor-prev" class="secondary-button" type="button">上一页</button>
+          <span id="visitor-page" class="admin-page-info">—</span>
+          <button id="visitor-next" class="secondary-button" type="button">下一页</button>
+        </div>
+        <div id="visitor-summary" class="admin-page-info"></div>
+        <div id="visitor-message" class="message" role="status" aria-live="polite"></div>
+      </section>
+
+      <section class="admin-panel" id="panel-comments">
+        <div class="admin-toolbar">
+          <input id="admin-comment-search" class="admin-search" type="search" maxlength="100" placeholder="搜索评论 / 昵称 / 访客 ID / 作品" />
+          <select id="admin-comment-status" class="admin-select">
+            <option value="">全部评论</option>
+            <option value="visible">展示中</option>
+            <option value="hidden">已隐藏</option>
+          </select>
+          <button id="admin-comment-refresh" class="secondary-button" type="button">刷新</button>
+        </div>
+        <div class="admin-table-wrap">
+          <table class="admin-table admin-comments-table">
+            <thead>
+              <tr><th>时间</th><th>作品</th><th>评论者</th><th>内容</th><th>访客 ID</th><th>IP</th><th>状态</th><th>操作</th></tr>
+            </thead>
+            <tbody id="admin-comment-rows"></tbody>
+          </table>
+        </div>
+        <div class="admin-pager">
+          <button id="admin-comment-prev" class="secondary-button" type="button">上一页</button>
+          <span id="admin-comment-page" class="admin-page-info">—</span>
+          <button id="admin-comment-next" class="secondary-button" type="button">下一页</button>
+        </div>
+        <div id="admin-comment-summary" class="admin-page-info"></div>
+        <div id="admin-comment-message" class="message" role="status" aria-live="polite"></div>
+      </section>
+
+      <section class="admin-panel" id="panel-reports">
+        <div class="admin-toolbar">
+          <select id="report-status-filter" class="admin-select">
+            <option value="">全部状态（待处理优先）</option>
+            <option value="pending">待处理</option>
+            <option value="handled">已处理</option>
+            <option value="ignored">已忽略</option>
+          </select>
+          <button id="report-refresh" class="secondary-button" type="button">刷新</button>
+          <span id="report-pending-info" class="admin-page-info">—</span>
+        </div>
+        <div class="admin-table-wrap">
+          <table class="admin-table admin-report-table">
+            <thead>
+              <tr><th>作品</th><th>标题</th><th>举报 / 最近时间</th><th>状态</th><th>处理信息</th><th>操作</th></tr>
+            </thead>
+            <tbody id="report-rows"></tbody>
+          </table>
+        </div>
+        <div class="admin-pager">
+          <button id="report-prev" class="secondary-button" type="button">上一页</button>
+          <span id="report-page" class="admin-page-info">—</span>
+          <button id="report-next" class="secondary-button" type="button">下一页</button>
+        </div>
+        <div id="report-message" class="message" role="status" aria-live="polite"></div>
+      </section>
+
+      <section class="admin-panel" id="panel-keys">
+        <div class="admin-toolbar">
+          <select id="key-status-filter" class="admin-select">
+            <option value="">全部密钥</option>
+            <option value="unused">未使用</option>
+            <option value="used">已使用</option>
+          </select>
+          <input id="key-search" class="admin-search" type="search" maxlength="200" placeholder="搜索密钥 / 任务 ID / 使用时间" />
+          <button id="key-refresh" class="secondary-button" type="button">刷新</button>
+          <div class="admin-keygen">
+            <input id="key-count" class="admin-number" type="number" min="1" max="200" step="1" value="10" aria-label="生成数量" />
+            <button id="key-generate" class="primary-button admin-compact" type="button">生成密钥</button>
+          </div>
+        </div>
+        <div class="admin-key-actions">
+          <button id="copy-unused-keys" class="secondary-button" type="button" disabled>复制全部未使用密钥</button>
+          <button id="export-unused-txt" class="secondary-button" type="button" disabled>导出未使用 TXT</button>
+          <button id="export-unused-csv" class="secondary-button" type="button" disabled>导出未使用 CSV</button>
+          <button id="key-purge-used" class="secondary-button" type="button" disabled>清理已使用密钥</button>
+        </div>
+        <div id="generated-keys" class="admin-generated hidden">
+          <div class="token-heading">
+            <span>新密钥（仅本次显示，请立即复制）</span>
+            <button id="copy-generated" class="secondary-button" type="button">复制全部</button>
+          </div>
+          <pre id="generated-keys-text" class="admin-pre"></pre>
+        </div>
+        <div class="admin-table-wrap">
+          <table class="admin-table">
+            <thead>
+              <tr><th>密钥</th><th>状态</th><th>任务</th><th>使用时间</th><th></th></tr>
+            </thead>
+            <tbody id="key-rows"></tbody>
+          </table>
+        </div>
+        <div class="admin-pager">
+          <button id="key-prev" class="secondary-button" type="button">上一页</button>
+          <span id="key-page" class="admin-page-info">—</span>
+          <button id="key-next" class="secondary-button" type="button">下一页</button>
+        </div>
+        <div id="key-summary" class="admin-page-info"></div>
+        <div id="key-message" class="message" role="status" aria-live="polite"></div>
+      </section>
+
+      <section class="admin-panel" id="panel-superkeys">
+        <div class="admin-toolbar">
+          <input id="superkey-value" class="admin-search" type="text" maxlength="128" autocomplete="off" placeholder="手动填写或随机生成超级密钥（8~128 位，不能含空白或控制字符）" />
+          <button id="superkey-generate" class="secondary-button" type="button">随机生成</button>
+          <input id="superkey-quota" class="admin-number" type="number" min="-1" max="1000000" step="1" value="100" aria-label="使用额度" />
+          <span class="admin-page-info">额度 -1 = 无限</span>
+          <button id="superkey-create" class="primary-button admin-compact" type="button">创建超级密钥</button>
+        </div>
+        <div class="admin-table-wrap">
+          <table class="admin-table admin-superkey-table">
+            <thead>
+              <tr><th>超级密钥</th><th>额度</th><th>已用</th><th>剩余</th><th>状态</th><th>备注</th><th>创建时间</th><th>最近使用</th><th>操作</th></tr>
+            </thead>
+            <tbody id="superkey-rows"></tbody>
+          </table>
+        </div>
+        <div id="superkey-summary" class="admin-page-info"></div>
+        <div id="superkey-message" class="message" role="status" aria-live="polite"></div>
+
+        <div id="superkey-usages" class="admin-superkey-usages hidden">
+          <div class="admin-detail-head">
+            <div>
+              <p class="section-kicker">SUPER KEY USAGE</p>
+              <h2 id="superkey-usages-title">使用记录</h2>
+              <p id="superkey-usages-note" class="admin-superkey-note-full"></p>
+            </div>
+            <button id="superkey-usages-close" class="secondary-button" type="button">收起</button>
+          </div>
+          <div class="admin-table-wrap">
+            <table class="admin-table admin-superkey-usage-table">
+              <thead>
+                <tr><th>时间</th><th>任务</th><th>状态</th><th>提示词</th><th>QQ 群 / 成员</th><th>取图</th><th>客户端 IP</th><th>访客</th></tr>
+              </thead>
+              <tbody id="superkey-usage-rows"></tbody>
+            </table>
+          </div>
+          <div class="admin-pager">
+            <button id="superkey-usage-prev" class="secondary-button" type="button">上一页</button>
+            <span id="superkey-usage-page" class="admin-page-info">—</span>
+            <button id="superkey-usage-next" class="secondary-button" type="button">下一页</button>
+          </div>
+          <div id="superkey-usage-summary" class="admin-page-info"></div>
+          <div id="superkey-usage-message" class="message" role="status" aria-live="polite"></div>
+        </div>
+      </section>
+
+      <section class="admin-panel" id="panel-accounts">
+        <div class="admin-page-info">账号状态、IP 绑定、密码与额度管理。</div>
+        <div class="admin-table-wrap">
+          <table class="admin-table">
+            <thead>
+              <tr><th>用户名</th><th>账号 ID</th><th>状态</th><th class="admin-num">剩余额度（不含免费）</th><th>注册 IP</th><th>任务数</th><th>关联节点</th><th>最近登录</th><th>操作</th></tr>
+            </thead>
+            <tbody id="account-rows"></tbody>
+          </table>
+        </div>
+        <div class="admin-pager">
+          <button id="account-prev" class="secondary-button" type="button">上一页</button>
+          <span id="account-page" class="admin-page-info">—</span>
+          <button id="account-next" class="secondary-button" type="button">下一页</button>
+        </div>
+        <div id="account-summary" class="admin-page-info"></div>
+        <div id="account-message" class="message" role="status" aria-live="polite"></div>
+
+        <div id="account-detail" class="admin-superkey-usages hidden">
+          <div class="admin-detail-head">
+            <div>
+              <p class="section-kicker">ACCOUNT DETAIL</p>
+              <h2 id="account-detail-title">账号详情</h2>
+              <p id="account-detail-note" class="admin-superkey-note-full"></p>
+            </div>
+            <button id="account-detail-close" class="secondary-button" type="button">收起</button>
+          </div>
+          <div class="admin-node-grid">
+            <label>调整类型
+              <select id="account-balance-bucket" class="admin-search">
+                <option value="bonus">奖励额度</option>
+                <option value="paid">兑换额度</option>
+                <option value="free">当日免费额度</option>
+              </select>
+            </label>
+            <label>增减数量（负数为扣减）
+              <input id="account-balance-delta" class="admin-search" type="number" step="1" value="1" />
+            </label>
+            <label>原因（必填）
+              <input id="account-balance-reason" class="admin-search" type="text" maxlength="200" />
+            </label>
+            <button id="account-balance-submit" class="primary-button" type="button">提交调整</button>
+          </div>
+          <div id="account-balance-message" class="message" role="status" aria-live="polite"></div>
+          <h3>额度流水</h3>
+          <div class="admin-table-wrap">
+            <table class="admin-table">
+              <thead>
+                <tr><th>时间</th><th>类型</th><th>桶</th><th>变动</th><th>变动后</th><th>任务</th><th>备注</th><th>操作人</th></tr>
+              </thead>
+              <tbody id="account-ledger-rows"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="admin-panel" id="panel-invites">
+        <div class="admin-node-grid">
+          <label>有效期（天，0=永久）
+            <input id="invite-valid-days" class="admin-search" type="number" min="0" max="3650" value="7" />
+          </label>
+          <label>可使用次数
+            <input id="invite-max-uses" class="admin-search" type="number" min="1" max="1000000" value="1" />
+          </label>
+          <label>生成数量（1-50）
+            <input id="invite-count" class="admin-search" type="number" min="1" max="50" value="1" />
+          </label>
+          <label>备注
+            <input id="invite-note" class="admin-search" type="text" maxlength="200" />
+          </label>
+          <button id="invite-create" class="primary-button" type="button">生成邀请码</button>
+        </div>
+        <div id="invite-message" class="message" role="status" aria-live="polite"></div>
+        <div class="admin-table-wrap">
+          <table class="admin-table">
+            <thead>
+              <tr><th>邀请码</th><th>状态</th><th>已用 / 上限</th><th>有效期至</th><th>备注</th><th>创建时间</th><th>操作</th></tr>
+            </thead>
+            <tbody id="invite-rows"></tbody>
+          </table>
+        </div>
+        <div id="invite-summary" class="admin-page-info"></div>
+        <div id="invite-redemptions" class="admin-superkey-usages hidden">
+          <div class="admin-detail-head">
+            <div>
+              <h2 id="invite-redemptions-title">兑换记录</h2>
+            </div>
+            <button id="invite-redemptions-close" class="secondary-button" type="button">收起</button>
+          </div>
+          <div class="admin-table-wrap">
+            <table class="admin-table">
+              <thead><tr><th>时间</th><th>用户名</th><th>账号状态</th><th>IP</th></tr></thead>
+              <tbody id="invite-redemption-rows"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="admin-panel" id="panel-recharge">
+        <div class="admin-node-grid">
+          <label>类型
+            <select id="recharge-kind" class="admin-search">
+              <option value="single">一次性（全体仅一次）</option>
+              <option value="per_account">每账号一次</option>
+            </select>
+          </label>
+          <label>面额（正整数）
+            <input id="recharge-amount" class="admin-search" type="number" min="1" max="1000000" value="1" />
+          </label>
+          <label>有效期（天，0=永久）
+            <input id="recharge-valid-days" class="admin-search" type="number" min="0" max="3650" value="180" />
+          </label>
+          <label>备注
+            <input id="recharge-note" class="admin-search" type="text" maxlength="200" />
+          </label>
+          <button id="recharge-create" class="primary-button" type="button">生成兑换密钥</button>
+        </div>
+        <div id="recharge-message" class="message" role="status" aria-live="polite"></div>
+        <div class="admin-table-wrap">
+          <table class="admin-table">
+            <thead>
+              <tr><th>兑换密钥</th><th>类型</th><th>面额</th><th>状态</th><th>已兑换</th><th>有效期至</th><th>创建时间</th><th>操作</th></tr>
+            </thead>
+            <tbody id="recharge-rows"></tbody>
+          </table>
+        </div>
+        <div id="recharge-summary" class="admin-page-info"></div>
+        <div id="recharge-redemptions" class="admin-superkey-usages hidden">
+          <div class="admin-detail-head">
+            <div>
+              <h2 id="recharge-redemptions-title">兑换记录</h2>
+            </div>
+            <button id="recharge-redemptions-close" class="secondary-button" type="button">收起</button>
+          </div>
+          <div class="admin-table-wrap">
+            <table class="admin-table">
+              <thead><tr><th>时间</th><th>用户名</th><th>账号状态</th><th>面额</th><th>IP</th></tr></thead>
+              <tbody id="recharge-redemption-rows"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="admin-panel" id="panel-nodes">
+        <div class="admin-node-form">
+          <div class="admin-node-grid">
+            <label>内部名称（仅管理员可见）
+              <input id="node-name" class="admin-search" type="text" maxlength="64" placeholder="例如：朋友 A 的节点" />
+            </label>
+            <label>公开名称（用户可见）
+              <input id="node-public-name" class="admin-search" type="text" maxlength="80" placeholder="留空则用户看到“生成节点”" />
+            </label>
+            <label>备注（仅管理员可见）
+              <input id="node-note" class="admin-search" type="text" maxlength="200" placeholder="可选" />
+            </label>
+            <label>节点地址
+              <input id="node-base-url" class="admin-search admin-mono" type="text" maxlength="512" placeholder="http://host:port 或 https://host/prefix" />
+            </label>
+            <label>并发上限
+              <select id="node-concurrency" class="admin-select">
+                <option value="1">1</option>
+                <option value="2">2</option>
+              </select>
+            </label>
+            <label class="admin-node-enabled">
+              <input id="node-enabled" type="checkbox" checked /> 启用
+            </label>
+          </div>
+          <div class="admin-toolbar">
+            <button id="node-save" class="primary-button admin-compact" type="button">添加节点</button>
+            <button id="node-cancel-edit" class="secondary-button hidden" type="button">取消编辑</button>
+            <button id="node-refresh" class="secondary-button" type="button">刷新</button>
+            <span id="node-edit-hint" class="admin-page-info"></span>
+          </div>
+        </div>
+        <div class="admin-table-wrap">
+          <table class="admin-table">
+            <thead>
+              <tr><th>状态</th><th>内部名称</th><th>公开名称</th><th>归属账号</th><th>备注</th><th>地址</th><th>探测方式</th><th>在途 / 并发</th><th>最近完成</th><th>操作</th></tr>
+            </thead>
+            <tbody id="node-rows"></tbody>
+          </table>
+        </div>
+        <div id="node-summary" class="admin-page-info"></div>
+        <div id="node-message" class="message" role="status" aria-live="polite"></div>
+      </section>
+
+      <section class="admin-panel" id="panel-loras">
+        <div class="admin-node-form">
+          <div class="admin-node-grid">
+            <label>文件名字
+              <input id="lora-filename" class="admin-search admin-mono" type="text" maxlength="128" placeholder="例如 my_lora.safetensors" />
+            </label>
+            <label>显示名称（用户可见）
+              <input id="lora-display-name" class="admin-search" type="text" maxlength="64" placeholder="例如 我的 LoRA" />
+            </label>
+            <label>排序
+              <input id="lora-sort-order" class="admin-number" type="number" min="0" max="10000" step="1" value="0" />
+            </label>
+            <label class="admin-node-enabled">
+              <input id="lora-enabled" type="checkbox" checked /> 启用
+            </label>
+          </div>
+          <div class="admin-toolbar">
+            <button id="lora-save" class="primary-button admin-compact" type="button">添加 LoRA</button>
+            <button id="lora-cancel-edit" class="secondary-button hidden" type="button">取消编辑</button>
+            <button id="lora-refresh" class="secondary-button" type="button">刷新</button>
+            <span id="lora-edit-hint" class="admin-page-info"></span>
+          </div>
+        </div>
+        <div class="admin-table-wrap">
+          <table class="admin-table">
+            <thead>
+              <tr><th>状态</th><th>文件名字</th><th>显示名称</th><th>排序</th><th>默认</th><th>创建时间</th><th>操作</th></tr>
+            </thead>
+            <tbody id="lora-rows"></tbody>
+          </table>
+        </div>
+        <div id="lora-summary" class="admin-page-info"></div>
+        <div id="lora-message" class="message" role="status" aria-live="polite"></div>
+      </section>
+
+      <section class="admin-panel" id="panel-ratelimit">
+        <div class="admin-toolbar">
+          <input
+            id="ratelimit-exemption-input"
+            class="admin-search"
+            type="text"
+            maxlength="128"
+            placeholder="单个 IP 或 CIDR，例如 203.0.113.5 / 10.0.0.0/8"
+          />
+          <button id="ratelimit-exemption-add" class="primary-button admin-compact" type="button">添加豁免</button>
+          <button id="ratelimit-exemption-refresh" class="secondary-button" type="button">刷新</button>
+        </div>
+        <div class="admin-table-wrap">
+          <table class="admin-table">
+            <thead>
+              <tr><th>类型</th><th>豁免项</th><th>添加时间</th><th>添加人</th><th>操作</th></tr>
+            </thead>
+            <tbody id="ratelimit-exemption-rows"></tbody>
+          </table>
+        </div>
+        <div id="ratelimit-exemption-summary" class="admin-page-info"></div>
+        <div id="ratelimit-exemption-message" class="message" role="status" aria-live="polite"></div>
+      </section>
+
+      <section class="admin-panel" id="panel-audit">
+        <div class="admin-toolbar">
+          <select id="log-kind" class="admin-select">
+            <option value="audit">图片审计日志</option>
+            <option value="gateway">运行日志</option>
+          </select>
+          <select id="log-limit" class="admin-select">
+            <option value="100">最近 100 条</option>
+            <option value="200" selected>最近 200 条</option>
+            <option value="500">最近 500 条</option>
+          </select>
+          <button id="log-refresh" class="secondary-button" type="button">刷新</button>
+        </div>
+        <div id="audit-list" class="admin-audit-list"></div>
+        <pre id="gateway-log" class="admin-pre admin-log-text hidden"></pre>
+        <div id="log-message" class="message" role="status" aria-live="polite"></div>
+      </section>
+
+      <section class="admin-panel" id="panel-system">
+        <div class="admin-toolbar">
+          <button id="system-refresh" class="secondary-button" type="button">刷新</button>
+          <span class="admin-page-info">运行状态与自动清理设置</span>
+          <button class="secondary-button" type="button" data-system-tab="nodes">节点管理</button>
+          <button class="secondary-button" type="button" data-system-tab="tasks">队列与任务</button>
+          <button class="secondary-button" type="button" data-system-tab="ratelimit">限流豁免</button>
+        </div>
+        <div class="admin-cleanup-settings">
+          <div class="admin-detail-head">
+            <div>
+              <p class="section-kicker">AUTO CLEANUP</p>
+              <h2>自动清理设置</h2>
+            </div>
+            <button id="cleanup-save" class="primary-button admin-compact" type="button">保存设置</button>
+          </div>
+          <div class="admin-cleanup-options">
+            <label class="admin-check"><input id="auto-delete-expired" type="checkbox" /> 自动清理过期图像（直接删除）</label>
+            <label class="admin-check"><input id="auto-delete-destroyed" type="checkbox" /> 自动清理销毁图像（直接删除）</label>
+          </div>
+          <p class="admin-page-info">只处理未发布图像；每分钟执行一次，直接删除任务图片与任务记录，不可恢复。</p>
+          <div id="cleanup-message" class="message" role="status" aria-live="polite"></div>
+        </div>
+        <div id="system-content" class="admin-system"></div>
+        <div id="system-message" class="message" role="status" aria-live="polite"></div>
+      </section>
+
+      <footer class="footer-note">管理员会话仅保存在本服务内存中。</footer>
+    </main>
+
+    <div id="node-owner-modal" class="admin-modal hidden" role="dialog" aria-modal="true" aria-labelledby="node-owner-title" aria-hidden="true">
+      <div class="admin-modal-backdrop" data-close-owner-modal></div>
+      <div class="admin-modal-card admin-owner-card">
+        <div class="admin-modal-head">
+          <div>
+            <p class="section-kicker">NODE OWNER</p>
+            <h2 id="node-owner-title">选择归属账号</h2>
+            <p id="node-owner-node" class="admin-page-info"></p>
+          </div>
+          <button id="node-owner-close" class="secondary-button" type="button">关闭</button>
+        </div>
+        <div class="admin-owner-body">
+          <div class="admin-owner-search">
+            <input id="node-owner-search" class="admin-search" type="search" maxlength="80" placeholder="按用户名搜索" />
+            <button id="node-owner-search-button" class="secondary-button" type="button">搜索</button>
+          </div>
+          <div id="node-owner-message" class="message" role="status" aria-live="polite"></div>
+          <div class="admin-table-wrap admin-owner-table-wrap">
+            <table class="admin-table admin-owner-table">
+              <thead><tr><th>用户名</th><th>账号 ID</th><th>状态</th><th>操作</th></tr></thead>
+              <tbody id="node-owner-rows"></tbody>
+            </table>
+          </div>
+          <div class="admin-owner-footer">
+            <label>绑定原因（写入审计）
+              <input id="node-owner-reason" class="admin-search" type="text" maxlength="200" value="手动绑定" />
+            </label>
+            <div class="admin-pager admin-owner-pager">
+              <button id="node-owner-prev" class="secondary-button" type="button">上一页</button>
+              <span id="node-owner-page" class="admin-page-info">—</span>
+              <button id="node-owner-next" class="secondary-button" type="button">下一页</button>
+            </div>
+          </div>
+          <div id="node-owner-summary" class="admin-page-info"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="admin-fullscreen" class="admin-fullscreen hidden" role="dialog" aria-modal="true" aria-label="全屏查看图像" aria-hidden="true">
+      <div class="admin-fullscreen-backdrop" data-admin-fullscreen-close></div>
+      <img id="admin-fullscreen-image" alt="全屏图像" />
+      <button id="admin-fullscreen-close" class="secondary-button" type="button">关闭</button>
+    </div>
+
+    <div id="gallery-modal" class="admin-modal hidden" role="dialog" aria-modal="true" aria-labelledby="gallery-modal-title" aria-hidden="true">
+      <div class="admin-modal-backdrop" data-close-modal></div>
+      <div class="admin-modal-card">
+        <div class="admin-modal-head">
+          <div>
+            <p class="section-kicker">GALLERY</p>
+            <h2 id="gallery-modal-title">生成图像</h2>
+          </div>
+          <button id="gallery-modal-close" class="secondary-button" type="button">关闭</button>
+        </div>
+        <div class="admin-modal-body">
+          <img id="gallery-modal-image" alt="生成图像大图" />
+          <div id="gallery-modal-meta" class="admin-gallery-meta"></div>
+        </div>
+      </div>
+    </div>
+
+    <script src="/admin.js" defer></script>
+  </body>
+</html>

@@ -1,0 +1,175 @@
+{
+  "2": {
+    "inputs": {
+      "text": "a cinematic illustration of a quiet mountain lake at sunrise, soft mist over the water, warm golden light, detailed textures, no text, no watermark.",
+      "clip": [
+        "11",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "moss-image Positive"
+    }
+  },
+  "3": {
+    "inputs": {
+      "text": "worst quality, bad anatomy, watermark, jpeg artifact, low quality,  blurry, deformed,extra limbs, extra fingers, missing fingers, text, watermark, signature,extra hands, extra arms, third arm, duplicate limbs, disembodied hands, extra fingers, fused fingers, malformed hands, ",
+      "clip": [
+        "11",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "moss-image Negative"
+    }
+  },
+  "4": {
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "batch_size": 1
+    },
+    "class_type": "EmptyFlux2LatentImage",
+    "_meta": {
+      "title": "空Latent图像（Flux2）"
+    }
+  },
+  "5": {
+    "inputs": {
+      "double_layers": "",
+      "single_layers": "22",
+      "start_percent": 0,
+      "end_percent": 1,
+      "model": [
+        "6",
+        0
+      ]
+    },
+    "class_type": "SkipLayerGuidanceDiTSimple",
+    "_meta": {
+      "title": "Uncond skip (empty = off)"
+    }
+  },
+  "6": {
+    "inputs": {
+      "shift": 5,
+      "model": [
+        "15",
+        0
+      ]
+    },
+    "class_type": "ModelSamplingSD3",
+    "_meta": {
+      "title": "Official Flow sigma shift"
+    }
+  },
+  "7": {
+    "inputs": {
+      "seed": 1067172476500320,
+      "steps": 50,
+      "cfg": 3,
+      "sampler_name": "euler",
+      "scheduler": "sgm_uniform",
+      "denoise": 1,
+      "model": [
+        "5",
+        0
+      ],
+      "positive": [
+        "2",
+        0
+      ],
+      "negative": [
+        "3",
+        0
+      ],
+      "latent_image": [
+        "4",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "K采样器"
+    }
+  },
+  "8": {
+    "inputs": {
+      "samples": [
+        "7",
+        0
+      ],
+      "vae": [
+        "12",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  },
+  "9": {
+    "inputs": {
+      "filename_prefix": "moss-image",
+      "images": [
+        "8",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "保存图像"
+    }
+  },
+  "10": {
+    "inputs": {
+      "unet_name": "moss_image_sft_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "MOSSImageUNETLoader",
+    "_meta": {
+      "title": "MOSS-Image-SFT INT8 (DiT)"
+    }
+  },
+  "11": {
+    "inputs": {
+      "clip_name": "qwen3.5_9b_moss_image_sft_w4a8_gptq.safetensors",
+      "device": "default"
+    },
+    "class_type": "MOSSImageCLIPLoader",
+    "_meta": {
+      "title": "Qwen3.5-9B W4A8 (Text Encoder)"
+    }
+  },
+  "12": {
+    "inputs": {
+      "vae_name": "flux2-vae_small.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "MOSS-Image VAE bf16"
+    }
+  },
+  "15": {
+    "inputs": {
+      "lora_name": "example_lora.safetensors",
+      "strength_model": 1,
+      "strength_clip": 0,
+      "model": [
+        "10",
+        0
+      ],
+      "clip": [
+        "11",
+        0
+      ]
+    },
+    "class_type": "LoraLoader",
+    "_meta": {
+      "title": "加载LoRA"
+    }
+  }
+}
