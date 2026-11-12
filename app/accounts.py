@@ -184,7 +184,9 @@ def account_balances(db: Database, settings: Settings, account_id: str) -> dict[
     )
 
 
-def build_account_router(*, db: Database, settings: Settings, admin_audit) -> APIRouter:
+def build_account_router(
+    *, db: Database, settings: Settings, admin_audit, runner: Any = None
+) -> APIRouter:
     router = APIRouter()
 
     @router.get("/account")
@@ -458,6 +460,33 @@ def build_account_router(*, db: Database, settings: Settings, admin_audit) -> AP
         ):
             raise HTTPException(status_code=404, detail="取图记录不存在")
         return {"deleted": True}
+
+    @router.post("/api/account/tokens/{job_id}/cancel")
+    def cancel_account_task(job_id: str, request: Request) -> dict[str, Any]:
+        require_same_origin(request)
+        current = resolve_account(request, db)
+        if not current:
+            raise HTTPException(status_code=401, detail="请先登录")
+        if not db.get_account_query_token(current["account_id"], job_id):
+            raise HTTPException(status_code=404, detail="取图记录不存在")
+        task = db.get_task(job_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        if task["status"] not in {"queued", "waiting_node", "submitted", "running"}:
+            raise HTTPException(status_code=409, detail="任务已结束，不能取消")
+        if runner is None:
+            raise HTTPException(status_code=503, detail="任务调度未就绪")
+        result = runner.cancel_task(job_id)
+        if not result.get("cancelled"):
+            raise HTTPException(status_code=409, detail="任务已结束，不能取消")
+        logger.info(
+            "account %s cancelled job %s", current["account_id"], job_id
+        )
+        return {
+            "cancelled": True,
+            "refunded": bool(result.get("refunded")),
+            "job_id": job_id,
+        }
 
     @router.get("/api/account/tokens/{job_id}/thumbnail")
     def account_token_thumbnail(job_id: str, request: Request):

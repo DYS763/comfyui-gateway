@@ -411,6 +411,7 @@ button:focus-visible, a:focus-visible { outline: 3px solid rgba(229, 72, 77, .4)
 .service-node-dot.online { background: #2f9e59; }
 .service-node-dot.offline { background: #b9a89d; }
 .service-node-dot.probing { background: #d69e17; }
+.service-node-tag { flex: 0 0 auto; padding: 1px 6px; border-radius: 999px; background: #e8f0ff; color: #2452b8; font-size: .62rem; font-weight: 600; }
 .service-node-meta { flex: 0 0 auto; color: var(--muted); font-size: .7rem; white-space: nowrap; }
 .service-node-empty { padding: 14px; border: 1.5px dashed #ffcf6b; border-radius: 14px; color: #8a5a2b; font-size: .78rem; text-align: center; background: #fff8e8; }
 select {

@@ -158,6 +158,14 @@ uvicorn app.main:app --host 0.0.0.0 --port 19613
 | `ACCOUNT_RECHARGE_RATE_MAX` | `10` | 账号兑换尝试上限 |
 | `ACCOUNT_RECHARGE_IP_MAX` | `30` | 单 IP 兑换尝试上限 |
 
+### 网关互联
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `GATEWAY_MAX_HOPS` | `3` | 任务最大转发跳数 |
+| `GATEWAY_REQUEST_TIMEOUT` | `30` | 访问远程网关的超时（秒） |
+| `REMOTE_CREDENTIALS_KEY_FILE` | `data/.remote-credentials.key` | 远程账号密码与取图凭证的加密密钥文件 |
+
 ### 私人图库
 
 | 变量 | 默认值 | 说明 |
@@ -189,6 +197,30 @@ uvicorn app.main:app --host 0.0.0.0 --port 19613
 3. 保存返回的取图令牌 `query_token`。匿名提交只返回一次；使用账号额度提交的取图记录可在账号中心查看。
 4. 用取图令牌查询状态、取图、发布或销毁。
 5. 登录账号后也可以使用账号额度提交，并在账号中心管理私人图库。
+
+## 网关互联
+
+同一个项目可以部署多个网关，并让一个网关把另一个网关当作扩展算力节点使用。
+
+### 提供方
+
+1. 在「邀请码」页生成邀请码，让对方注册一个专用账号。
+2. 在「账号」页把该账号设为「网关账号」，填写对方网关的 `gateway_id`（对方可调用 `/api/gateway/info` 获取）。
+3. 给该账号充值，作为对方可消费的额度。对方每提交一张图扣 1 额度。
+
+### 消费方
+
+1. 在「节点」页选择类型「远程网关」，填写网关地址、网关账号和密码。
+2. 保存时会先连接对方校验；成功后该远程网关会出现在节点列表和前台节点选择器中。
+3. 可随时点击「测试连接」或「刷新能力与余额」。
+4. 前台可直接选择远程节点，也可以保持「自动分配」；自动分配优先使用本地节点。
+
+说明：
+
+- 每个远程网关地址只能配置一个账号。
+- 远程任务失败、过期或取消时，双方会逐跳退回额度。
+- 任务最多经过 `GATEWAY_MAX_HOPS` 跳，出现环路会被拒绝。
+- 远程网关的密码和取图凭证使用 Fernet 加密保存，管理接口不会回显。
 
 ## API
 
@@ -229,10 +261,15 @@ curl -X POST http://127.0.0.1:19613/api/submit \
 | `steps` | 否 | 3~70 |
 | `seed` | 否 | 随机种子 |
 | `width` / `height` | 否 | 分辨率，按 16 像素对齐 |
-| `endpoint_id` | 否 | 指定 ComfyUI 节点，不填则自动分配 |
+| `endpoint_id` | 否 | 指定节点（本地或远程），不填则自动分配 |
 | `lora_id` | 否 | 指定 LoRA 条目 |
 | `disable_lora` | 否 | 本次不使用 LoRA |
 | `lora_strength` | 否 | 0~2，最多两位小数 |
+| `profile` | 否 | 参数配置名称，默认 `default` |
+| `client_request_id` | 否 | 幂等请求 ID，网关账号必填 |
+| `origin_gateway_id` | 否 | 任务来源网关，网关账号必填 |
+| `hop` | 否 | 已转发跳数，网关账号必填且至少为 1 |
+| `visited` | 否 | 已经过的网关 ID 列表 |
 
 响应示例：
 
@@ -287,6 +324,40 @@ curl -X POST http://127.0.0.1:19613/api/destroy \
   -d '{"token": "getpic_xxx"}'
 ```
 
+### 取消任务
+
+```bash
+curl -X POST http://127.0.0.1:19613/api/account/tokens/{job_id}/cancel \
+  -b "cg_account=xxx"
+```
+
+返回：
+
+```json
+{"cancelled": true, "refunded": true, "job_id": "xxx"}
+```
+
+### 网关信息
+
+网关账号登录后可获取本网关身份与能力：
+
+```bash
+curl http://127.0.0.1:19613/api/gateway/info -b "cg_account=xxx"
+```
+
+```json
+{
+  "gateway_id": "gw-b",
+  "protocol_version": 1,
+  "max_hops": 3,
+  "profiles": ["default"],
+  "capabilities": {"layout": true, "max_width": 1920, "max_height": 1920, "min_steps": 3, "max_steps": 70, "loras": []},
+  "queue": {"accepting": true, "depth": 3, "capacity": 8}
+}
+```
+
+不是网关账号时返回 403。
+
 ## 安全与隐私
 
 - 不要把 `.env`、`data/`、数据库、密钥文件或日志提交到仓库。
@@ -303,6 +374,9 @@ app/
   database.py          SQLite 数据访问与迁移
   runner.py            任务调度、ComfyUI 轮询、自动清理
   accounts.py          账号、额度、邀请码、兑换密钥
+  capabilities.py      节点能力计算与匹配
+  gateway_client.py    远程网关客户端
+  crypto.py            远程凭证加密
   private_gallery.py   私人图库与分享链接
   public_gallery.py    公开画廊、点赞、评论、举报
   admin_routes.py      管理后台 API 与页面

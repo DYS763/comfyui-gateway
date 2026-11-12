@@ -106,6 +106,8 @@ class NodeHealthMonitor:
         for endpoint in endpoints:
             if not endpoint.get("enabled"):
                 continue
+            if endpoint.get("kind") == "gateway":
+                continue
             interval = (
                 self.offline_interval
                 if endpoint.get("health_state") == "offline"

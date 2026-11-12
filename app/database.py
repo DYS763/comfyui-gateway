@@ -611,6 +611,7 @@ class Database:
             self._migrate_interaction_tables()
             self._migrate_public_works()
             self._migrate_account_schema()
+            self._migrate_gateway_schema()
 
     def _migrate_comments(self) -> None:
         columns = {
@@ -798,6 +799,305 @@ class Database:
             "ON comfy_endpoints(owner_account_id)"
         )
 
+    def _migrate_gateway_schema(self) -> None:
+        task_columns = {
+            row["name"] for row in self._connection.execute("PRAGMA table_info(tasks)")
+        }
+        for name, definition in (
+            ("origin_gateway_id", "TEXT"),
+            ("hop", "INTEGER NOT NULL DEFAULT 0"),
+            ("visited_json", "TEXT"),
+            ("client_request_id", "TEXT"),
+            ("profile", "TEXT"),
+        ):
+            if name not in task_columns:
+                self._connection.execute(
+                    f"ALTER TABLE tasks ADD COLUMN {name} {definition}"
+                )
+        self._connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_origin_client_request "
+            "ON tasks(origin_gateway_id, client_request_id) "
+            "WHERE client_request_id IS NOT NULL"
+        )
+
+        endpoint_columns = {
+            row["name"]
+            for row in self._connection.execute("PRAGMA table_info(comfy_endpoints)")
+        }
+        for name, definition in (
+            ("kind", "TEXT NOT NULL DEFAULT 'comfyui'"),
+            ("capabilities_json", "TEXT"),
+            ("remote_username", "TEXT"),
+            ("remote_password_encrypted", "TEXT"),
+            ("remote_session_encrypted", "TEXT"),
+            ("remote_session_expires_at", "TEXT"),
+            ("remote_gateway_id", "TEXT"),
+            ("remote_capabilities_json", "TEXT"),
+            ("remote_capabilities_updated_at", "TEXT"),
+            ("remote_balance", "INTEGER"),
+            ("remote_balance_updated_at", "TEXT"),
+            ("remote_last_login_at", "TEXT"),
+            ("remote_last_error", "TEXT"),
+        ):
+            if name not in endpoint_columns:
+                self._connection.execute(
+                    f"ALTER TABLE comfy_endpoints ADD COLUMN {name} {definition}"
+                )
+        self._connection.execute("DROP INDEX IF EXISTS idx_endpoints_base_url")
+        self._connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_endpoints_kind_base_url "
+            "ON comfy_endpoints(kind, base_url)"
+        )
+        self._connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_endpoints_remote_gateway_id "
+            "ON comfy_endpoints(remote_gateway_id) "
+            "WHERE kind = 'gateway' AND remote_gateway_id IS NOT NULL"
+        )
+
+        account_columns = {
+            row["name"] for row in self._connection.execute("PRAGMA table_info(accounts)")
+        }
+        for name, definition in (
+            ("is_gateway", "INTEGER NOT NULL DEFAULT 0"),
+            ("bound_gateway_id", "TEXT"),
+        ):
+            if name not in account_columns:
+                self._connection.execute(
+                    f"ALTER TABLE accounts ADD COLUMN {name} {definition}"
+                )
+
+        self._connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS remote_jobs (
+                local_job_id TEXT PRIMARY KEY,
+                endpoint_id TEXT NOT NULL,
+                remote_job_id TEXT,
+                client_request_id TEXT NOT NULL,
+                query_token_encrypted TEXT,
+                remote_status TEXT,
+                submitted_at TEXT,
+                result_fetched_at TEXT,
+                destroyed_at TEXT,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_remote_jobs_endpoint
+                ON remote_jobs(endpoint_id);
+            """
+        )
+
+    def get_app_setting(self, key: str) -> str | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT value FROM app_settings WHERE key = ?", (key,)
+            ).fetchone()
+            return str(row["value"]) if row else None
+
+    def ensure_gateway_id(self, now: datetime, max_hops: int) -> str:
+        with self._lock, self._connection:
+            self._connection.execute(
+                """
+                INSERT OR IGNORE INTO app_settings(key, value, updated_at, updated_by)
+                VALUES ('gateway_id', ?, ?, 'system')
+                """,
+                (uuid.uuid4().hex, iso(now)),
+            )
+            self._connection.execute(
+                """
+                INSERT OR IGNORE INTO app_settings(key, value, updated_at, updated_by)
+                VALUES ('gateway_max_hops', ?, ?, 'system')
+                """,
+                (str(max(1, int(max_hops))), iso(now)),
+            )
+            row = self._connection.execute(
+                "SELECT value FROM app_settings WHERE key = 'gateway_id'"
+            ).fetchone()
+            return str(row["value"])
+
+    def gateway_max_hops(self, default: int) -> int:
+        value = self.get_app_setting("gateway_max_hops")
+        try:
+            return max(1, int(value)) if value is not None else max(1, int(default))
+        except ValueError:
+            return max(1, int(default))
+
+    def get_task_by_client_request(
+        self, origin_gateway_id: str, client_request_id: str
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT * FROM tasks
+                WHERE origin_gateway_id = ? AND client_request_id = ?
+                """,
+                (origin_gateway_id, client_request_id),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def set_account_gateway(
+        self,
+        account_id: str,
+        *,
+        is_gateway: bool,
+        gateway_id: str | None,
+        updated_at: datetime,
+    ) -> dict[str, Any] | None:
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                """
+                UPDATE accounts
+                SET is_gateway = ?, bound_gateway_id = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    1 if is_gateway else 0,
+                    gateway_id if is_gateway else None,
+                    iso(updated_at),
+                    account_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return None
+            row = self._connection.execute(
+                "SELECT * FROM accounts WHERE id = ?", (account_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def create_remote_job(
+        self,
+        *,
+        local_job_id: str,
+        endpoint_id: str,
+        client_request_id: str,
+        remote_job_id: str | None,
+        query_token_encrypted: str | None,
+        remote_status: str,
+        submitted_at: datetime | None,
+        created_at: datetime,
+    ) -> None:
+        stamp = iso(created_at)
+        with self._lock, self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO remote_jobs(
+                    local_job_id, endpoint_id, remote_job_id, client_request_id,
+                    query_token_encrypted, remote_status, submitted_at,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(local_job_id) DO UPDATE SET
+                    endpoint_id = excluded.endpoint_id,
+                    remote_job_id = excluded.remote_job_id,
+                    client_request_id = excluded.client_request_id,
+                    query_token_encrypted = excluded.query_token_encrypted,
+                    remote_status = excluded.remote_status,
+                    submitted_at = excluded.submitted_at,
+                    last_error = NULL,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    local_job_id,
+                    endpoint_id,
+                    remote_job_id,
+                    client_request_id,
+                    query_token_encrypted,
+                    remote_status,
+                    iso(submitted_at) if submitted_at else None,
+                    stamp,
+                    stamp,
+                ),
+            )
+
+    def get_remote_job(self, local_job_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM remote_jobs WHERE local_job_id = ?", (local_job_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def update_remote_job(self, local_job_id: str, **fields: Any) -> None:
+        allowed = {
+            "remote_job_id",
+            "query_token_encrypted",
+            "remote_status",
+            "submitted_at",
+            "result_fetched_at",
+            "destroyed_at",
+            "last_error",
+            "updated_at",
+        }
+        unknown = set(fields) - allowed
+        if unknown:
+            raise ValueError(f"unsupported remote job fields: {sorted(unknown)}")
+        fields["updated_at"] = iso(utc_now())
+        assignments = ", ".join(f"{name} = ?" for name in fields)
+        with self._lock, self._connection:
+            self._connection.execute(
+                f"UPDATE remote_jobs SET {assignments} WHERE local_job_id = ?",
+                (*fields.values(), local_job_id),
+            )
+
+    def delete_remote_job(self, local_job_id: str) -> None:
+        with self._lock, self._connection:
+            self._connection.execute(
+                "DELETE FROM remote_jobs WHERE local_job_id = ?", (local_job_id,)
+            )
+
+    def list_remote_jobs(self, *, active_only: bool = True) -> list[dict[str, Any]]:
+        with self._lock:
+            if active_only:
+                rows = self._connection.execute(
+                    """
+                    SELECT r.* FROM remote_jobs r
+                    JOIN tasks t ON t.id = r.local_job_id
+                    WHERE t.status IN ('queued', 'waiting_node', 'submitted', 'running')
+                    ORDER BY r.created_at ASC
+                    """
+                ).fetchall()
+            else:
+                rows = self._connection.execute(
+                    "SELECT * FROM remote_jobs ORDER BY created_at ASC"
+                ).fetchall()
+            return [dict(row) for row in rows]
+
+    def cancel_active_task(
+        self,
+        job_id: str,
+        *,
+        now: datetime,
+        free_limit: int = 0,
+        message: str = "任务已取消",
+    ) -> bool:
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                "SELECT status FROM tasks WHERE id = ?", (job_id,)
+            ).fetchone()
+            if not row or row["status"] not in {
+                "queued",
+                "waiting_node",
+                "submitted",
+                "running",
+            }:
+                return False
+            cursor = self._connection.execute(
+                """
+                UPDATE tasks
+                SET status = 'failed',
+                    failure_reason = 'cancelled',
+                    error_message = ?,
+                    queue_position = NULL,
+                    last_checked_at = ?
+                WHERE id = ? AND status IN ('queued', 'waiting_node', 'submitted', 'running')
+                """,
+                (message, iso(now), job_id),
+            )
+            if cursor.rowcount != 1:
+                return False
+            self._refund_account_charge_tx(
+                job_id=job_id, now=now, free_limit=free_limit, note="cancelled"
+            )
+            return True
+
     def _migrate_interaction_tables(self) -> None:
         for table in ("gallery_likes", "gallery_comments", "gallery_views"):
             fks = self._connection.execute(
@@ -973,6 +1273,11 @@ class Database:
         charge_bucket: str | None = None,
         charge_ledger_id: int | None = None,
         queue_expires_at: datetime | None = None,
+        origin_gateway_id: str | None = None,
+        hop: int = 0,
+        visited_json: str | None = None,
+        client_request_id: str | None = None,
+        profile: str | None = None,
     ) -> None:
         self._connection.execute(
             """
@@ -984,8 +1289,9 @@ class Database:
                 requested_endpoint_id, lora_id, lora_filename_snapshot,
                 lora_name_snapshot, lora_strength, lora_disabled,
                 account_id, credential_kind, charge_bucket, charge_ledger_id,
-                queue_expires_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                queue_expires_at, origin_gateway_id, hop, visited_json,
+                client_request_id, profile
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job_id,
@@ -1017,6 +1323,11 @@ class Database:
                 charge_bucket,
                 charge_ledger_id,
                 None if queue_expires_at is None else iso(queue_expires_at),
+                origin_gateway_id,
+                max(0, int(hop)),
+                visited_json,
+                client_request_id,
+                profile,
             ),
         )
 
@@ -1049,6 +1360,11 @@ class Database:
         status: str = "queued",
         account_id: str | None = None,
         queue_expires_at: datetime | None = None,
+        origin_gateway_id: str | None = None,
+        hop: int = 0,
+        visited_json: str | None = None,
+        client_request_id: str | None = None,
+        profile: str | None = None,
     ) -> None:
         with self._lock, self._connection:
             self._connection.execute(
@@ -1083,6 +1399,11 @@ class Database:
                 credential_kind="single",
                 account_id=account_id,
                 queue_expires_at=queue_expires_at,
+                origin_gateway_id=origin_gateway_id,
+                hop=hop,
+                visited_json=visited_json,
+                client_request_id=client_request_id,
+                profile=profile,
             )
 
     def create_super_key_task(
@@ -1116,6 +1437,11 @@ class Database:
         status: str = "queued",
         account_id: str | None = None,
         queue_expires_at: datetime | None = None,
+        origin_gateway_id: str | None = None,
+        hop: int = 0,
+        visited_json: str | None = None,
+        client_request_id: str | None = None,
+        profile: str | None = None,
     ) -> bool:
         with self._lock, self._connection:
             cursor = self._connection.execute(
@@ -1157,6 +1483,11 @@ class Database:
                 credential_kind="super",
                 account_id=account_id,
                 queue_expires_at=queue_expires_at,
+                origin_gateway_id=origin_gateway_id,
+                hop=hop,
+                visited_json=visited_json,
+                client_request_id=client_request_id,
+                profile=profile,
             )
             self._connection.execute(
                 """
@@ -2922,6 +3253,13 @@ class Database:
         enabled: bool,
         created_at: datetime,
         created_by: str,
+        kind: str = "comfyui",
+        remote_username: str | None = None,
+        remote_password_encrypted: str | None = None,
+        remote_gateway_id: str | None = None,
+        remote_capabilities_json: str | None = None,
+        remote_balance: int | None = None,
+        remote_last_error: str | None = None,
     ) -> dict[str, Any]:
         endpoint_id = uuid.uuid4().hex
         stamp = iso(created_at)
@@ -2930,8 +3268,12 @@ class Database:
                 """
                 INSERT INTO comfy_endpoints(
                     id, name, note, public_name, base_url, max_concurrency,
-                    enabled, created_at, updated_at, created_by, updated_by
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    enabled, created_at, updated_at, created_by, updated_by,
+                    kind, remote_username, remote_password_encrypted,
+                    remote_gateway_id, remote_capabilities_json,
+                    remote_capabilities_updated_at, remote_balance,
+                    remote_balance_updated_at, remote_last_error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     endpoint_id,
@@ -2945,6 +3287,15 @@ class Database:
                     stamp,
                     created_by,
                     created_by,
+                    kind,
+                    remote_username,
+                    remote_password_encrypted,
+                    remote_gateway_id,
+                    remote_capabilities_json,
+                    stamp if remote_capabilities_json else None,
+                    remote_balance,
+                    stamp if remote_balance is not None else None,
+                    remote_last_error,
                 ),
             )
             row = self._connection.execute(
@@ -2963,6 +3314,18 @@ class Database:
             "max_concurrency",
             "enabled",
             "probe_method",
+            "capabilities_json",
+            "remote_username",
+            "remote_password_encrypted",
+            "remote_session_encrypted",
+            "remote_session_expires_at",
+            "remote_gateway_id",
+            "remote_capabilities_json",
+            "remote_capabilities_updated_at",
+            "remote_balance",
+            "remote_balance_updated_at",
+            "remote_last_login_at",
+            "remote_last_error",
             "updated_at",
             "updated_by",
         }

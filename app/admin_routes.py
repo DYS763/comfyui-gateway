@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 import unicodedata
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse, RedirectResponse
@@ -14,9 +15,17 @@ from pydantic import BaseModel, ConfigDict, Field
 from .admin import AdminAuth
 from .admin_audit import AdminAuditLog
 from .accounts import ACCOUNT_LEDGER_VISIBLE_LIMIT
+from .capabilities import parse_capabilities
 from .comfy import ComfyClient
 from .config import Settings
+from .crypto import CredentialCipher, CredentialError
 from .database import Database, iso, utc_now
+from .gateway_client import (
+    GatewayClientPool,
+    GatewayError,
+    refresh_gateway_endpoint,
+    test_gateway_connection,
+)
 from .http_cache import cached_file_response
 from .image_audit import ImageAuditLog, read_tail_lines
 from .key_store import KeyStore
@@ -152,6 +161,13 @@ class AccountPasswordRequest(BaseModel):
     password: str = Field(min_length=1, max_length=256)
 
 
+class AccountGatewayRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    is_gateway: bool
+    gateway_id: str | None = Field(default=None, max_length=64)
+
+
 class RechargeKeyCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -251,6 +267,10 @@ class EndpointCreateRequest(BaseModel):
     base_url: str
     max_concurrency: int = 1
     enabled: bool = True
+    kind: Literal["comfyui", "gateway"] = "comfyui"
+    remote_username: str | None = None
+    remote_password: str | None = None
+    capabilities: dict[str, Any] | None = None
 
 
 class EndpointUpdateRequest(BaseModel):
@@ -262,6 +282,9 @@ class EndpointUpdateRequest(BaseModel):
     base_url: str | None = None
     max_concurrency: int | None = None
     enabled: bool | None = None
+    remote_username: str | None = None
+    remote_password: str | None = None
+    capabilities: dict[str, Any] | None = None
 
 
 def _clamp(value: int, minimum: int, maximum: int) -> int:
@@ -299,11 +322,19 @@ def _endpoint_status(endpoint: dict[str, Any], in_flight: int) -> str:
 
 
 def _endpoint_item(endpoint: dict[str, Any], in_flight: int) -> dict[str, Any]:
-    return {
-        **endpoint,
-        "status": _endpoint_status(endpoint, in_flight),
-        "in_flight": in_flight,
+    hidden = {"remote_password_encrypted", "remote_session_encrypted"}
+    item = {
+        key: value for key, value in endpoint.items() if key not in hidden
     }
+    item["has_password"] = bool(endpoint.get("remote_password_encrypted"))
+    item["has_session"] = bool(endpoint.get("remote_session_encrypted"))
+    item["status"] = _endpoint_status(endpoint, in_flight)
+    item["in_flight"] = in_flight
+    capabilities = parse_capabilities(endpoint.get("remote_capabilities_json"))
+    if capabilities is None:
+        capabilities = parse_capabilities(endpoint.get("capabilities_json"))
+    item["capabilities"] = capabilities
+    return item
 
 
 def _endpoint_item_with_owner(
@@ -368,6 +399,8 @@ def _system_config(db: Database, settings: Settings) -> dict[str, Any]:
         "log_dir": str(settings.log_dir),
         "skill_file": str(settings.skill_file),
         "database_file": str(settings.database_file),
+        "gateway_id": db.ensure_gateway_id(utc_now(), settings.gateway_max_hops),
+        "gateway_max_hops": db.gateway_max_hops(settings.gateway_max_hops),
         "prompt_node_id": settings.prompt_node_id,
         "negative_prompt_node_id": settings.negative_prompt_node_id,
         "prompt_max_length": settings.prompt_max_length,
@@ -539,6 +572,8 @@ def _account_item(row: dict[str, Any]) -> dict[str, Any]:
         "frozen_reason": row.get("frozen_reason"),
         "task_count": int(row.get("task_count") or 0),
         "endpoint_count": int(row.get("endpoint_count") or 0),
+        "is_gateway": bool(row.get("is_gateway")),
+        "bound_gateway_id": row.get("bound_gateway_id"),
     }
 
 
@@ -612,6 +647,10 @@ def _task_summary(task: dict[str, Any]) -> dict[str, Any]:
         "public_removed_by": task.get("public_removed_by"),
         "visitor_id": task.get("visitor_id"),
         "last_retrieval_visitor_id": task.get("last_retrieval_visitor_id"),
+        "origin_gateway_id": task.get("origin_gateway_id"),
+        "hop": int(task.get("hop") or 0),
+        "profile": task.get("profile"),
+        "client_request_id": task.get("client_request_id"),
         "layout_json": task.get("layout_json"),
         "qq_group": task.get("qq_group"),
         "qq_group_name": task.get("qq_group_name"),
@@ -770,6 +809,8 @@ def build_admin_router(
     audit: ImageAuditLog,
     admin_audit: AdminAuditLog,
     auth: AdminAuth,
+    cipher: CredentialCipher,
+    gateway_clients: GatewayClientPool,
 ) -> APIRouter:
     router = APIRouter()
 
@@ -920,6 +961,26 @@ def build_admin_router(
         detail["queue_position"] = db.effective_queue_position(task)
         detail["account"] = _task_account_view(db, task)
         detail["bindings"] = db.list_task_bindings(job_id)
+        endpoint = (
+            db.get_endpoint(task["endpoint_id"])
+            if task.get("endpoint_id")
+            else None
+        )
+        detail["endpoint_kind"] = endpoint.get("kind") if endpoint else None
+        remote = db.get_remote_job(job_id)
+        detail["remote"] = (
+            {
+                "endpoint_id": remote["endpoint_id"],
+                "remote_job_id": remote.get("remote_job_id"),
+                "remote_status": remote.get("remote_status"),
+                "submitted_at": remote.get("submitted_at"),
+                "result_fetched_at": remote.get("result_fetched_at"),
+                "destroyed_at": remote.get("destroyed_at"),
+                "last_error": remote.get("last_error"),
+            }
+            if remote
+            else None
+        )
         return detail
 
     @router.post("/api/admin/tasks/{job_id}/retry")
@@ -1105,9 +1166,50 @@ def build_admin_router(
                 status_code=422, detail="并发上限只能是 1 或 2"
             )
         if any(
-            endpoint["base_url"] == base_url for endpoint in db.list_endpoints()
+            endpoint["base_url"] == base_url
+            and (endpoint.get("kind") or "comfyui") == payload.kind
+            for endpoint in db.list_endpoints()
         ):
             raise HTTPException(status_code=409, detail="节点地址已存在")
+        remote_fields: dict[str, Any] = {}
+        if payload.kind == "gateway":
+            remote_username = _endpoint_text(
+                payload.remote_username, "网关账号", 64, required=True
+            )
+            password = (payload.remote_password or "").strip()
+            if not password:
+                raise HTTPException(status_code=422, detail="请填写网关密码")
+            self_gateway_id = db.ensure_gateway_id(
+                utc_now(), settings.gateway_max_hops
+            )
+            try:
+                result = test_gateway_connection(
+                    base_url,
+                    remote_username,
+                    password,
+                    settings.gateway_request_timeout_seconds,
+                )
+            except (GatewayError, CredentialError) as exc:
+                raise HTTPException(
+                    status_code=422, detail=f"无法连接远程网关：{exc}"
+                ) from exc
+            remote_gateway_id = result["gateway_id"]
+            if remote_gateway_id == self_gateway_id:
+                raise HTTPException(status_code=409, detail="不能把当前网关添加为远程节点")
+            if any(
+                endpoint.get("remote_gateway_id") == remote_gateway_id
+                for endpoint in db.list_endpoints()
+            ):
+                raise HTTPException(status_code=409, detail="该远程网关已存在")
+            remote_fields = {
+                "remote_username": remote_username,
+                "remote_password_encrypted": cipher.encrypt(password),
+                "remote_gateway_id": remote_gateway_id,
+                "remote_capabilities_json": json.dumps(
+                    result.get("capabilities") or {}, ensure_ascii=False
+                ),
+                "remote_balance": result.get("balance"),
+            }
         endpoint = db.create_endpoint(
             name=name,
             note=note,
@@ -1117,7 +1219,26 @@ def build_admin_router(
             enabled=payload.enabled,
             created_at=utc_now(),
             created_by=username,
+            kind=payload.kind,
+            **remote_fields,
         )
+        capabilities = payload.capabilities if payload.kind == "comfyui" else None
+        if capabilities is not None:
+            endpoint = db.update_endpoint(
+                endpoint["id"],
+                updated_at=utc_now(),
+                capabilities_json=json.dumps(capabilities, ensure_ascii=False),
+            ) or endpoint
+        if payload.kind == "gateway":
+            endpoint = db.update_endpoint_health(
+                endpoint["id"],
+                health_state="online",
+                consecutive_failures=0,
+                probe_method="gateway",
+                last_probe_at=utc_now(),
+                last_error=None,
+                last_ok_at=utc_now(),
+            ) or endpoint
         admin_audit.record(
             action="node.add",
             admin=username,
@@ -1130,6 +1251,7 @@ def build_admin_router(
                 "base_url": base_url,
                 "max_concurrency": payload.max_concurrency,
                 "enabled": payload.enabled,
+                "kind": payload.kind,
             },
         )
         logger.info("admin %s added node %s (%s)", username, endpoint["id"], base_url)
@@ -1173,7 +1295,10 @@ def build_admin_router(
                         detail="节点有在途任务，暂不能修改地址",
                     )
                 if any(
-                    item["base_url"] == base_url and item["id"] != endpoint_id
+                    item["base_url"] == base_url
+                    and item["id"] != endpoint_id
+                    and (item.get("kind") or "comfyui")
+                    == (endpoint.get("kind") or "comfyui")
                     for item in db.list_endpoints()
                 ):
                     raise HTTPException(status_code=409, detail="节点地址已存在")
@@ -1188,13 +1313,98 @@ def build_admin_router(
             if not isinstance(changes["enabled"], bool):
                 raise HTTPException(status_code=422, detail="启用状态必须是布尔值")
             update_fields["enabled"] = changes["enabled"]
-        update_fields["probe_method"] = "system_stats"
+        if "capabilities" in changes:
+            if endpoint.get("kind") == "gateway":
+                raise HTTPException(
+                    status_code=422, detail="远程网关的能力以对方返回为准"
+                )
+            capabilities = changes["capabilities"]
+            if capabilities is not None and not isinstance(capabilities, dict):
+                raise HTTPException(status_code=422, detail="能力配置必须是对象")
+            update_fields["capabilities_json"] = (
+                json.dumps(capabilities, ensure_ascii=False)
+                if capabilities
+                else None
+            )
+        if endpoint.get("kind") == "gateway":
+            target_url = update_fields.get("base_url", endpoint["base_url"])
+            new_username = (changes.get("remote_username") or "").strip()
+            url_changed = target_url != endpoint["base_url"]
+            username_changed = bool(new_username) and new_username != (
+                endpoint.get("remote_username") or ""
+            )
+            password_changed = bool((changes.get("remote_password") or "").strip())
+            if url_changed or username_changed or password_changed:
+                remote_username = _endpoint_text(
+                    new_username or endpoint.get("remote_username"),
+                    "网关账号",
+                    64,
+                    required=True,
+                )
+                if password_changed:
+                    password = changes["remote_password"].strip()
+                    password_encrypted = cipher.encrypt(password)
+                else:
+                    try:
+                        password = cipher.decrypt(
+                            endpoint.get("remote_password_encrypted") or ""
+                        )
+                    except CredentialError as exc:
+                        raise HTTPException(
+                            status_code=422,
+                            detail=f"无法读取已保存的网关密码：{exc}",
+                        ) from exc
+                    password_encrypted = endpoint.get("remote_password_encrypted")
+                self_gateway_id = db.ensure_gateway_id(
+                    utc_now(), settings.gateway_max_hops
+                )
+                try:
+                    result = test_gateway_connection(
+                        target_url,
+                        remote_username,
+                        password,
+                        settings.gateway_request_timeout_seconds,
+                    )
+                except (GatewayError, CredentialError) as exc:
+                    raise HTTPException(
+                        status_code=422, detail=f"无法连接远程网关：{exc}"
+                    ) from exc
+                remote_gateway_id = result["gateway_id"]
+                if remote_gateway_id == self_gateway_id:
+                    raise HTTPException(
+                        status_code=409, detail="不能把当前网关添加为远程节点"
+                    )
+                if any(
+                    item.get("remote_gateway_id") == remote_gateway_id
+                    and item["id"] != endpoint_id
+                    for item in db.list_endpoints()
+                ):
+                    raise HTTPException(status_code=409, detail="该远程网关已存在")
+                update_fields.update(
+                    remote_username=remote_username,
+                    remote_password_encrypted=password_encrypted,
+                    remote_gateway_id=remote_gateway_id,
+                    remote_capabilities_json=json.dumps(
+                        result.get("capabilities") or {}, ensure_ascii=False
+                    ),
+                    remote_capabilities_updated_at=iso(now),
+                    remote_balance=result.get("balance"),
+                    remote_balance_updated_at=iso(now),
+                    remote_session_encrypted=None,
+                    remote_session_expires_at=None,
+                    remote_last_error=None,
+                )
+        update_fields["probe_method"] = (
+            "gateway" if endpoint.get("kind") == "gateway" else "system_stats"
+        )
         update_fields["updated_by"] = username
         updated = db.update_endpoint(
             endpoint_id, updated_at=now, **update_fields
         )
         if updated is None:
             raise HTTPException(status_code=404, detail="节点不存在")
+        if endpoint.get("kind") == "gateway":
+            gateway_clients.drop(endpoint_id)
         diff = {
             key: {"from": endpoint.get(key), "to": updated.get(key)}
             for key in update_fields
@@ -1213,6 +1423,93 @@ def build_admin_router(
             "item": _endpoint_item(
                 updated, db.count_endpoint_in_flight(endpoint_id, now)
             )
+        }
+
+    @router.post("/api/admin/nodes/{endpoint_id}/test")
+    def test_node(
+        endpoint_id: str,
+        _username: str = Depends(require_admin),
+    ) -> dict[str, Any]:
+        endpoint = db.get_endpoint(endpoint_id)
+        if not endpoint:
+            raise HTTPException(status_code=404, detail="节点不存在")
+        if endpoint.get("kind") != "gateway":
+            raise HTTPException(status_code=422, detail="只有远程网关支持连接测试")
+        try:
+            password = cipher.decrypt(
+                endpoint.get("remote_password_encrypted") or ""
+            )
+        except CredentialError as exc:
+            return {"ok": False, "error": str(exc)}
+        try:
+            result = test_gateway_connection(
+                endpoint["base_url"],
+                endpoint.get("remote_username") or "",
+                password,
+                settings.gateway_request_timeout_seconds,
+            )
+        except (GatewayError, CredentialError) as exc:
+            return {"ok": False, "error": str(exc)}
+        self_gateway_id = db.ensure_gateway_id(
+            utc_now(), settings.gateway_max_hops
+        )
+        if result["gateway_id"] == self_gateway_id:
+            return {"ok": False, "error": "该地址指向当前网关"}
+        return result
+
+    @router.post("/api/admin/nodes/{endpoint_id}/refresh")
+    def refresh_node(
+        endpoint_id: str,
+        username: str = Depends(require_admin),
+    ) -> dict[str, Any]:
+        endpoint = db.get_endpoint(endpoint_id)
+        if not endpoint:
+            raise HTTPException(status_code=404, detail="节点不存在")
+        if endpoint.get("kind") != "gateway":
+            raise HTTPException(status_code=422, detail="只有远程网关支持刷新")
+        self_gateway_id = db.ensure_gateway_id(
+            utc_now(), settings.gateway_max_hops
+        )
+        reject = {self_gateway_id}
+        reject.update(
+            item.get("remote_gateway_id")
+            for item in db.list_endpoints()
+            if item["id"] != endpoint_id and item.get("remote_gateway_id")
+        )
+        client = gateway_clients.get(endpoint)
+        try:
+            result = refresh_gateway_endpoint(
+                db,
+                cipher,
+                endpoint,
+                client,
+                reject_gateway_ids=reject,
+            )
+        except (GatewayError, CredentialError) as exc:
+            db.update_endpoint(
+                endpoint_id, updated_at=utc_now(), remote_last_error=str(exc)
+            )
+            raise HTTPException(
+                status_code=502, detail=f"刷新失败：{exc}"
+            ) from exc
+        updated = db.get_endpoint(endpoint_id) or endpoint
+        admin_audit.record(
+            action="node.refresh",
+            admin=username,
+            client_ip=None,
+            target=f"{updated['id']}:{updated['name']}",
+            details={
+                "gateway_id": result.get("gateway_id"),
+                "balance": result.get("balance"),
+            },
+        )
+        logger.info("admin %s refreshed gateway node %s", username, endpoint_id)
+        return {
+            "result": result,
+            "item": _endpoint_item(
+                updated,
+                db.count_endpoint_in_flight(endpoint_id, utc_now()),
+            ),
         }
 
     @router.delete("/api/admin/nodes/{endpoint_id}")
@@ -2339,6 +2636,52 @@ def build_admin_router(
         )
         logger.info("admin %s reset password for %s", username, account_id)
         return {"ok": True, "sessions_revoked": revoked}
+
+    @router.post("/api/admin/accounts/{account_id}/gateway")
+    def set_account_gateway(
+        account_id: str,
+        payload: AccountGatewayRequest,
+        request: Request,
+        username: str = Depends(require_admin),
+    ) -> dict[str, Any]:
+        account = db.get_account_by_id(account_id)
+        if not account:
+            raise HTTPException(status_code=404, detail="账号不存在")
+        gateway_id = None
+        if payload.is_gateway:
+            try:
+                gateway_id = validate_label(payload.gateway_id, 64)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            if not gateway_id:
+                raise HTTPException(status_code=422, detail="请填写上游网关 ID")
+        updated = db.set_account_gateway(
+            account_id,
+            is_gateway=payload.is_gateway,
+            gateway_id=gateway_id,
+            updated_at=utc_now(),
+        )
+        if not updated:
+            raise HTTPException(status_code=404, detail="账号不存在")
+        admin_audit.record(
+            action="account.gateway",
+            admin=username,
+            client_ip=audit_client_ip(request),
+            target=account_id,
+            details={
+                "username": account["username"],
+                "is_gateway": payload.is_gateway,
+                "gateway_id": gateway_id,
+            },
+        )
+        logger.info(
+            "admin %s set account %s gateway=%s bound=%s",
+            username,
+            account_id,
+            payload.is_gateway,
+            gateway_id,
+        )
+        return _account_item(updated)
 
     @router.get("/api/admin/recharge-keys")
     def list_recharge_keys(

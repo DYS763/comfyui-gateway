@@ -227,6 +227,12 @@ function updateEndpointOptions(items) {
     } else if (item.status === "unknown") {
       label += "（状态未知，将等待上线）";
     }
+    if (item.kind === "gateway") {
+      label = `远程 · ${label}`;
+      if (item.balance_available === false) {
+        label += " [暂不可用]";
+      }
+    }
     option.textContent = label;
     endpointSelect.appendChild(option);
   }
@@ -299,6 +305,9 @@ function renderServicePopover(data) {
     dot.setAttribute("aria-hidden", "true");
     name.appendChild(dot);
     name.appendChild(element("span", "", item.public_name || "生成节点"));
+    if (item.kind === "gateway") {
+      name.appendChild(element("span", "service-node-tag", "远程"));
+    }
     row.appendChild(name);
     const statusLabel = SERVICE_STATUS_LABELS[item.status] || "未知";
     const busy =
@@ -308,7 +317,7 @@ function renderServicePopover(data) {
       element(
         "span",
         "service-node-meta",
-        `${statusLabel} · 在途 ${item.in_flight || 0}/${item.max_concurrency || 1}${busy ? " · 繁忙" : ""}`,
+        `${statusLabel} · 在途 ${item.in_flight || 0}/${item.max_concurrency || 1}${busy ? " · 繁忙" : ""}${item.balance_available === false ? " · 暂不可用" : ""}`,
       ),
     );
     serviceNodeList.appendChild(row);

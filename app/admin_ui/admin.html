@@ -489,6 +489,12 @@
       <section class="admin-panel" id="panel-nodes">
         <div class="admin-node-form">
           <div class="admin-node-grid">
+            <label>节点类型
+              <select id="node-kind" class="admin-select">
+                <option value="comfyui">ComfyUI 节点</option>
+                <option value="gateway">远程网关</option>
+              </select>
+            </label>
             <label>内部名称（仅管理员可见）
               <input id="node-name" class="admin-search" type="text" maxlength="64" placeholder="例如：朋友 A 的节点" />
             </label>
@@ -498,8 +504,14 @@
             <label>备注（仅管理员可见）
               <input id="node-note" class="admin-search" type="text" maxlength="200" placeholder="可选" />
             </label>
-            <label>节点地址
+            <label id="node-base-url-field">节点地址
               <input id="node-base-url" class="admin-search admin-mono" type="text" maxlength="512" placeholder="http://host:port 或 https://host/prefix" />
+            </label>
+            <label id="node-username-field" class="hidden">网关账号
+              <input id="node-remote-username" class="admin-search" type="text" maxlength="64" placeholder="在该网关上注册的账号" />
+            </label>
+            <label id="node-password-field" class="hidden">网关密码
+              <input id="node-remote-password" class="admin-search" type="password" maxlength="256" placeholder="编辑时留空表示不修改" autocomplete="new-password" />
             </label>
             <label>并发上限
               <select id="node-concurrency" class="admin-select">
@@ -521,7 +533,7 @@
         <div class="admin-table-wrap">
           <table class="admin-table">
             <thead>
-              <tr><th>状态</th><th>内部名称</th><th>公开名称</th><th>归属账号</th><th>备注</th><th>地址</th><th>探测方式</th><th>在途 / 并发</th><th>最近完成</th><th>操作</th></tr>
+              <tr><th>状态</th><th>类型</th><th>内部名称</th><th>公开名称</th><th>归属账号</th><th>备注</th><th>地址 / 账号</th><th>在途 / 并发</th><th>余额</th><th>最近检查</th><th>操作</th></tr>
             </thead>
             <tbody id="node-rows"></tbody>
           </table>

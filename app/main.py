@@ -28,9 +28,17 @@ from .accounts import (
     build_account_router,
     resolve_account,
 )
+from .capabilities import (
+    default_capabilities,
+    endpoint_capabilities,
+    match_capabilities,
+    requirement_from_values,
+)
 from .comfy import ComfyClient, ComfyError
 from .config import Settings, settings
+from .crypto import CredentialCipher
 from .database import Database, iso, utc_now
+from .gateway_client import GatewayClientPool
 from .image_audit import ImageAuditLog
 from .key_store import KeyErrorState, KeyStore
 from .layout import LayoutError, normalize_layout
@@ -87,6 +95,12 @@ def _credential_tag(value: str | None) -> str:
 
 db = Database(settings.database_file)
 db.ensure_default_endpoint(settings.comfy_url, utc_now())
+GATEWAY_ID = db.ensure_gateway_id(utc_now(), settings.gateway_max_hops)
+GATEWAY_MAX_HOPS = db.gateway_max_hops(settings.gateway_max_hops)
+credential_cipher = CredentialCipher(settings.remote_credentials_key_file)
+gateway_clients = GatewayClientPool(
+    credential_cipher, settings.gateway_request_timeout_seconds
+)
 image_audit = ImageAuditLog(settings.image_audit_file)
 admin_audit = AdminAuditLog(settings.admin_audit_file)
 key_store = KeyStore(settings.key_file)
@@ -107,7 +121,15 @@ if _default_lora:
         display_name=Path(_default_lora).stem,
         created_at=utc_now(),
     )
-runner = JobRunner(db, comfy, workflow, settings, image_audit)
+runner = JobRunner(
+    db,
+    comfy,
+    workflow,
+    settings,
+    image_audit,
+    cipher=credential_cipher,
+    gateway_clients=gateway_clients,
+)
 admin_auth = AdminAuth(
     settings.admin_username,
     settings.admin_password,
@@ -140,6 +162,11 @@ class SubmitRequest(BaseModel):
     lora_id: int | None = None
     disable_lora: bool = False
     lora_strength: float | None = None
+    client_request_id: str | None = Field(default=None, max_length=128)
+    origin_gateway_id: str | None = Field(default=None, max_length=64)
+    hop: int = Field(default=0, ge=0, le=32)
+    visited: list[str] | None = Field(default=None, max_length=32)
+    profile: str | None = Field(default=None, max_length=64)
 
 
 class TokenRequest(BaseModel):
@@ -154,6 +181,118 @@ class PublishRequest(BaseModel):
     token: str = Field(min_length=1, max_length=512)
     work_name: str | None = Field(default=None, max_length=80)
     author: str | None = Field(default=None, max_length=80)
+
+
+def _gateway_link(
+    payload: SubmitRequest, account_row: dict[str, Any] | None
+) -> tuple[str, int, list[str], str | None]:
+    origin = (payload.origin_gateway_id or "").strip() or None
+    client_request_id = (payload.client_request_id or "").strip() or None
+    visited = [
+        str(item).strip()
+        for item in (payload.visited or [])
+        if str(item).strip()
+    ]
+    if len(visited) > GATEWAY_MAX_HOPS + 1:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_link", "message": "链路长度超出限制"},
+        )
+    if any(len(item) > 64 for item in visited):
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_link", "message": "链路网关标识过长"},
+        )
+    is_gateway_account = bool(account_row and account_row.get("is_gateway"))
+    if is_gateway_account:
+        if not payload.use_account_quota:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "gateway_quota_required",
+                    "message": "网关账号必须使用账号额度提交",
+                },
+            )
+        bound = (account_row.get("bound_gateway_id") or "").strip()
+        if not origin:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "gateway_identity_required",
+                    "message": "网关账号提交时必须声明来源网关",
+                },
+            )
+        if not bound:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "gateway_binding_missing",
+                    "message": "网关账号尚未绑定上游网关",
+                },
+            )
+        if not visited:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "invalid_link", "message": "链路信息不完整"},
+            )
+        if visited[-1] != bound:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "gateway_mismatch",
+                    "message": "直接上游网关与账号绑定不一致",
+                },
+            )
+        if origin not in visited:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "invalid_link",
+                    "message": "来源网关必须出现在链路中",
+                },
+            )
+        if not client_request_id:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "client_request_required",
+                    "message": "网关账号提交时必须提供 client_request_id",
+                },
+            )
+        if payload.hop < 1:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "invalid_link", "message": "链路跳数不正确"},
+            )
+        hop = int(payload.hop)
+        if hop > GATEWAY_MAX_HOPS:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "max_hops_exceeded",
+                    "message": "链路跳数超过上限",
+                },
+            )
+        if GATEWAY_ID in visited:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "gateway_loop", "message": "检测到网关环路"},
+            )
+        if origin == GATEWAY_ID:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "gateway_loop", "message": "检测到网关环路"},
+            )
+        return origin, hop, visited, client_request_id
+    if origin or client_request_id or visited or payload.hop:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "gateway_fields_forbidden",
+                "message": "普通账号不能携带网关链路字段",
+            },
+        )
+    return GATEWAY_ID, 0, [], None
 
 
 def _task_public(task: dict[str, Any]) -> dict[str, Any]:
@@ -254,11 +393,18 @@ app.include_router(
         audit=image_audit,
         admin_audit=admin_audit,
         auth=admin_auth,
+        cipher=credential_cipher,
+        gateway_clients=gateway_clients,
     )
 )
 app.include_router(build_gallery_router(db=db, settings=settings))
 app.include_router(
-    build_account_router(db=db, settings=settings, admin_audit=admin_audit)
+    build_account_router(
+        db=db,
+        settings=settings,
+        admin_audit=admin_audit,
+        runner=runner,
+    )
 )
 app.include_router(build_private_gallery_router(db=db, settings=settings))
 
@@ -271,6 +417,7 @@ def healthz() -> dict[str, str]:
 @app.get("/api/comfyui/nodes")
 def comfyui_nodes() -> dict[str, Any]:
     now = utc_now()
+    defaults = default_capabilities(db)
     items: list[dict[str, Any]] = []
     for endpoint in db.list_endpoints():
         if not endpoint.get("enabled"):
@@ -284,15 +431,25 @@ def comfyui_nodes() -> dict[str, Any]:
             status = "probing"
         else:
             status = "unknown"
+        caps = endpoint_capabilities(endpoint, defaults)
+        balance = endpoint.get("remote_balance")
+        balance_available = (
+            True
+            if endpoint.get("kind") != "gateway" or balance is None
+            else int(balance) >= 1
+        )
         items.append(
             {
                 "endpoint_id": endpoint["id"],
+                "kind": endpoint.get("kind") or "comfyui",
                 "public_name": endpoint.get("public_name") or "生成节点",
                 "status": status,
                 "in_flight": db.count_endpoint_in_flight(endpoint["id"], now),
                 "max_concurrency": int(
                     endpoint.get("max_concurrency") or 1
                 ),
+                "capabilities": caps,
+                "balance_available": balance_available,
             }
         )
     online = sum(1 for item in items if item["status"] == "online")
@@ -301,6 +458,35 @@ def comfyui_nodes() -> dict[str, Any]:
         "nodes_total": len(items),
         "nodes_online": online,
         "available_nodes": online,
+    }
+
+
+@app.get("/api/gateway/info")
+def gateway_info(request: Request) -> dict[str, Any]:
+    current = resolve_account(request, db)
+    if not current:
+        raise HTTPException(status_code=401, detail="请先登录")
+    account = db.get_account_by_id(current["account_id"])
+    if not account or not account.get("is_gateway"):
+        raise HTTPException(status_code=403, detail="该账号不是网关账号")
+    caps = default_capabilities(db)
+    counts = db.queue_status()
+    capacity = sum(
+        int(endpoint.get("max_concurrency") or 1)
+        for endpoint in db.list_endpoints()
+        if endpoint.get("enabled")
+    )
+    return {
+        "gateway_id": GATEWAY_ID,
+        "protocol_version": 1,
+        "max_hops": GATEWAY_MAX_HOPS,
+        "profiles": caps["profiles"],
+        "capabilities": caps,
+        "queue": {
+            "accepting": not counts["paused"] and counts["nodes_online"] > 0,
+            "depth": counts["queued"] + counts["waiting_node"],
+            "capacity": capacity,
+        },
     }
 
 
@@ -443,6 +629,7 @@ def submit(payload: SubmitRequest, request: Request) -> dict[str, Any]:
             None if payload.qq_number is None else str(payload.qq_number), 64
         )
         qq_name = validate_label(payload.qq_name, 80)
+        profile = validate_label(payload.profile, 64) or "default"
         layout_result = None
         if payload.layout is not None:
             if payload.prompt.strip():
@@ -459,7 +646,47 @@ def submit(payload: SubmitRequest, request: Request) -> dict[str, Any]:
         logger.warning("submit rejected: %s", exc)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     layout_json = layout_result.json_text if layout_result else None
+    if requested_endpoint is not None:
+        caps = endpoint_capabilities(requested_endpoint, default_capabilities(db))
+        reason = match_capabilities(
+            caps,
+            requirement_from_values(
+                profile=profile,
+                layout=layout_result is not None,
+                width=width,
+                height=height,
+                steps=payload.steps,
+                lora_name=lora_name if lora_id is not None else None,
+                negative_prompt=negative_prompt,
+            ),
+        )
+        if reason:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "capability_mismatch",
+                    "message": f"节点不支持该任务：{reason}",
+                },
+            )
+        if requested_endpoint.get("kind") == "gateway":
+            balance = requested_endpoint.get("remote_balance")
+            if balance is not None and int(balance) < 1:
+                raise HTTPException(
+                    status_code=402,
+                    detail={
+                        "code": "gateway_balance",
+                        "message": "该远程节点暂不可用（额度不足）",
+                    },
+                )
     session_account = resolve_account(request, db)
+    session_row = (
+        db.get_account_by_id(session_account["account_id"])
+        if session_account
+        else None
+    )
+    origin_gateway_id, hop, visited, client_request_id = _gateway_link(
+        payload, session_row
+    )
     account = None
     super_key = None
     key_hash = None
@@ -515,6 +742,37 @@ def submit(payload: SubmitRequest, request: Request) -> dict[str, Any]:
                     exc,
                 )
                 raise HTTPException(status_code=403, detail=str(exc)) from exc
+    if client_request_id and origin_gateway_id:
+        existing = db.get_task_by_client_request(
+            origin_gateway_id, client_request_id
+        )
+        if existing:
+            token_row = (
+                db.get_account_query_token(
+                    session_account["account_id"], existing["id"]
+                )
+                if session_account
+                else None
+            )
+            if not token_row:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "duplicate_request",
+                        "message": "重复的请求，且无法取回取图凭证",
+                    },
+                )
+            logger.info(
+                "submit replay origin=%s client_request_id=%s job_id=%s",
+                origin_gateway_id,
+                client_request_id,
+                existing["id"],
+            )
+            return {
+                "query_token": token_row["token"],
+                "task": _task_public(existing),
+                "charge": None,
+            }
     initial_status = "waiting_node" if requested_endpoint_id else "queued"
     rate_ip = resolve_client_ip(
         request.client.host if request.client else None,
@@ -615,6 +873,11 @@ def submit(payload: SubmitRequest, request: Request) -> dict[str, Any]:
         "lora_disabled": lora_disabled,
         "status": initial_status,
         "account_id": session_account["account_id"] if session_account else None,
+        "origin_gateway_id": origin_gateway_id,
+        "hop": hop,
+        "visited_json": json.dumps(visited, ensure_ascii=False) if visited else None,
+        "client_request_id": client_request_id,
+        "profile": profile,
     }
 
     def create_task() -> None:

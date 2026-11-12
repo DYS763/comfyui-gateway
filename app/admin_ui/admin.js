@@ -101,7 +101,13 @@ async function api(path, options = {}) {
   }
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const detail = Array.isArray(data.detail) ? "请求参数不合法" : data.detail;
+    const raw = data.detail;
+    const detail =
+      Array.isArray(raw)
+        ? "请求参数不合法"
+        : raw && typeof raw === "object"
+          ? raw.message || `请求失败（${response.status}）`
+          : raw;
     const error = new Error(detail || `请求失败（${response.status}）`);
     error.status = response.status;
     throw error;
@@ -347,8 +353,8 @@ function nodeActionButton(label, paths, handler, disabled = false) {
   return button;
 }
 
-function nodeProbeLabel(method) {
-  return method === "queue" ? "queue（退化）" : "system_stats";
+function nodeKindLabel(kind) {
+  return kind === "gateway" ? "远程网关" : "ComfyUI";
 }
 
 function renderNodeRows(items) {
@@ -357,7 +363,7 @@ function renderNodeRows(items) {
   if (!items.length) {
     const row = el("tr");
     const cell = el("td", "admin-empty", "暂无节点。");
-    cell.colSpan = 10;
+    cell.colSpan = 11;
     row.appendChild(cell);
     tbody.appendChild(row);
     return;
@@ -377,6 +383,15 @@ function renderNodeRows(items) {
     statusCell.appendChild(status);
     row.appendChild(statusCell);
 
+    const kindCell = el("td");
+    kindCell.appendChild(
+      el(
+        "span",
+        item.kind === "gateway" ? "state-pill gateway" : "state-pill",
+        nodeKindLabel(item.kind),
+      ),
+    );
+    row.appendChild(kindCell);
     row.appendChild(el("td", "", item.name || "—"));
     row.appendChild(el("td", "", item.public_name || "生成节点"));
     const ownerCell = el(
@@ -389,16 +404,34 @@ function renderNodeRows(items) {
     const noteCell = el("td", "", item.note || "—");
     noteCell.title = item.note || "";
     row.appendChild(noteCell);
-    const urlCell = el("td", "admin-mono", item.base_url);
-    urlCell.title = item.base_url;
-    row.appendChild(urlCell);
-    row.appendChild(el("td", "admin-nowrap", nodeProbeLabel(item.probe_method)));
+    const addressCell = el("td", "admin-mono");
+    addressCell.appendChild(el("div", "", item.base_url));
+    if (item.kind === "gateway") {
+      addressCell.appendChild(
+        el("div", "admin-page-info", `账号：${item.remote_username || "—"}`),
+      );
+    }
+    addressCell.title = [
+      item.base_url,
+      item.remote_username,
+      item.remote_gateway_id,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    row.appendChild(addressCell);
     row.appendChild(
       el("td", "admin-mono", `${item.in_flight ?? 0} / ${item.max_concurrency}`),
     );
     row.appendChild(
-      el("td", "admin-nowrap", formatDate(item.last_task_completed_at)),
+      el(
+        "td",
+        "admin-nowrap",
+        item.kind === "gateway" ? (item.remote_balance ?? "—") : "—",
+      ),
     );
+    const probeCell = el("td", "admin-nowrap", formatDate(item.last_probe_at));
+    probeCell.title = item.remote_last_error || item.last_error || "";
+    row.appendChild(probeCell);
 
     const actions = el("td");
     const actionWrap = el("div", "node-actions");
@@ -408,6 +441,22 @@ function renderNodeRows(items) {
         "M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z",
       ], () => beginNodeEdit(item)),
     );
+    if (item.kind === "gateway") {
+      actionWrap.appendChild(
+        nodeActionButton(
+          "测试连接",
+          ["M5 3l14 9-14 9Z"],
+          () => testNode(item),
+        ),
+      );
+      actionWrap.appendChild(
+        nodeActionButton(
+          "刷新能力与余额",
+          ["M21 12a9 9 0 1 1-3-6.7", "M21 3v6h-6"],
+          () => refreshNode(item),
+        ),
+      );
+    }
     actionWrap.appendChild(
       nodeActionButton(
         item.enabled ? "禁用节点（不中断在途任务）" : "启用节点",
@@ -423,21 +472,23 @@ function renderNodeRows(items) {
         (item.in_flight ?? 0) > 0,
       ),
     );
-    actionWrap.appendChild(
-      nodeActionButton(
-        item.owner_account_id ? "更换归属账号" : "绑定归属账号",
-        ["M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2", "M9 7a4 4 0 1 0 0-8 4 4 0 0 0 0 8"],
-        () => openNodeOwnerPicker(item),
-      ),
-    );
-    if (item.owner_account_id) {
+    if (item.kind !== "gateway") {
       actionWrap.appendChild(
         nodeActionButton(
-          "解绑归属账号",
-          ["M18 6 6 18", "M6 6l12 12"],
-          () => unbindNodeOwner(item),
+          item.owner_account_id ? "更换归属账号" : "绑定归属账号",
+          ["M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2", "M9 7a4 4 0 1 0 0-8 4 4 0 0 0 0 8"],
+          () => openNodeOwnerPicker(item),
         ),
       );
+      if (item.owner_account_id) {
+        actionWrap.appendChild(
+          nodeActionButton(
+            "解绑归属账号",
+            ["M18 6 6 18", "M6 6l12 12"],
+            () => unbindNodeOwner(item),
+          ),
+        );
+      }
     }
     actions.appendChild(actionWrap);
     row.appendChild(actions);
@@ -470,26 +521,46 @@ async function loadNodes({ silent = false } = {}) {
   }
 }
 
+function syncNodeKindFields() {
+  const kind = document.querySelector("#node-kind").value;
+  document
+    .querySelector("#node-username-field")
+    .classList.toggle("hidden", kind !== "gateway");
+  document
+    .querySelector("#node-password-field")
+    .classList.toggle("hidden", kind !== "gateway");
+  document.querySelector("#node-kind").disabled = Boolean(state.nodes.editingId);
+}
+
 function resetNodeForm() {
   state.nodes.editingId = null;
+  document.querySelector("#node-kind").value = "comfyui";
   document.querySelector("#node-name").value = "";
   document.querySelector("#node-public-name").value = "";
   document.querySelector("#node-note").value = "";
   document.querySelector("#node-base-url").value = "";
   document.querySelector("#node-base-url").disabled = false;
+  document.querySelector("#node-remote-username").value = "";
+  document.querySelector("#node-remote-password").value = "";
   document.querySelector("#node-concurrency").value = "1";
   document.querySelector("#node-enabled").checked = true;
   document.querySelector("#node-save").textContent = "添加节点";
   document.querySelector("#node-cancel-edit").classList.add("hidden");
   document.querySelector("#node-edit-hint").textContent = "";
+  syncNodeKindFields();
 }
 
 function beginNodeEdit(item) {
   state.nodes.editingId = item.id;
+  document.querySelector("#node-kind").value =
+    item.kind === "gateway" ? "gateway" : "comfyui";
   document.querySelector("#node-name").value = item.name || "";
   document.querySelector("#node-public-name").value = item.public_name || "";
   document.querySelector("#node-note").value = item.note || "";
   document.querySelector("#node-base-url").value = item.base_url || "";
+  document.querySelector("#node-remote-username").value =
+    item.remote_username || "";
+  document.querySelector("#node-remote-password").value = "";
   document.querySelector("#node-concurrency").value = String(item.max_concurrency);
   document.querySelector("#node-enabled").checked = Boolean(item.enabled);
   document.querySelector("#node-save").textContent = "保存修改";
@@ -500,6 +571,7 @@ function beginNodeEdit(item) {
   hint.textContent = baseInput.disabled
     ? `该节点有 ${item.in_flight} 个在途任务，完成后才能修改地址。`
     : "正在编辑节点；地址可修改。";
+  syncNodeKindFields();
   document.querySelector(".admin-node-form").scrollIntoView({
     behavior: "smooth",
     block: "start",
@@ -509,10 +581,15 @@ function beginNodeEdit(item) {
 async function saveNode() {
   const message = document.querySelector("#node-message");
   const button = document.querySelector("#node-save");
+  const kind = document.querySelector("#node-kind").value;
   const name = document.querySelector("#node-name").value.trim();
   const publicName = document.querySelector("#node-public-name").value.trim();
   const note = document.querySelector("#node-note").value.trim();
   const baseUrl = document.querySelector("#node-base-url").value.trim();
+  const remoteUsername = document
+    .querySelector("#node-remote-username")
+    .value.trim();
+  const remotePassword = document.querySelector("#node-remote-password").value;
   if (!name) {
     setMessage(message, "请填写内部名称。", true);
     return;
@@ -521,14 +598,25 @@ async function saveNode() {
     setMessage(message, "名称、备注或公开名称超出长度限制。", true);
     return;
   }
-  if (!state.nodes.editingId && !baseUrl) {
+  if (!baseUrl) {
     setMessage(message, "请填写节点地址。", true);
     return;
+  }
+  if (kind === "gateway") {
+    if (!remoteUsername) {
+      setMessage(message, "请填写网关账号。", true);
+      return;
+    }
+    if (!state.nodes.editingId && !remotePassword) {
+      setMessage(message, "请填写网关密码。", true);
+      return;
+    }
   }
   const payload = {
     name,
     note,
     public_name: publicName,
+    base_url: baseUrl,
     max_concurrency: Number.parseInt(
       document.querySelector("#node-concurrency").value,
       10,
@@ -536,14 +624,13 @@ async function saveNode() {
     enabled: document.querySelector("#node-enabled").checked,
   };
   const editingId = state.nodes.editingId;
-  if (!editingId || !document.querySelector("#node-base-url").disabled) {
-    if (!baseUrl) {
-      setMessage(message, "请填写节点地址。", true);
-      return;
-    }
-    payload.base_url = baseUrl;
+  if (!editingId) payload.kind = kind;
+  if (kind === "gateway") {
+    payload.remote_username = remoteUsername;
+    if (remotePassword) payload.remote_password = remotePassword;
   }
   button.disabled = true;
+  setMessage(message, editingId ? "正在保存…" : "正在连接远程网关…");
   try {
     await api(
       editingId ? `/api/admin/nodes/${editingId}` : "/api/admin/nodes",
@@ -560,6 +647,43 @@ async function saveNode() {
     setMessage(message, error.message, true);
   } finally {
     button.disabled = false;
+  }
+}
+
+async function testNode(item) {
+  const message = document.querySelector("#node-message");
+  setMessage(message, `正在测试 ${item.name}…`);
+  try {
+    const data = await api(`/api/admin/nodes/${item.id}/test`, {
+      method: "POST",
+    });
+    if (!data.ok) {
+      setMessage(message, `连接失败：${data.error || "未知错误"}`, true);
+      return;
+    }
+    setMessage(
+      message,
+      `连接成功：网关 ${data.gateway_id} · 余额 ${data.balance ?? "—"}`,
+    );
+  } catch (error) {
+    setMessage(message, error.message, true);
+  }
+}
+
+async function refreshNode(item) {
+  const message = document.querySelector("#node-message");
+  setMessage(message, `正在刷新 ${item.name} 的能力与余额…`);
+  try {
+    const data = await api(`/api/admin/nodes/${item.id}/refresh`, {
+      method: "POST",
+    });
+    await loadNodes({ silent: true });
+    setMessage(
+      message,
+      `刷新成功：余额 ${data.result?.balance ?? "—"}`,
+    );
+  } catch (error) {
+    setMessage(message, error.message, true);
   }
 }
 
@@ -999,8 +1123,21 @@ function renderTaskDetail(data) {
     ["取图截止", formatDate(data.expires_at)],
     ["ComfyUI prompt ID", data.comfy_prompt_id || "—"],
     ["节点", data.endpoint_name || "—"],
+    [
+      "节点类型",
+      data.endpoint_kind === "gateway"
+        ? "远程网关"
+        : data.endpoint_kind === "comfyui"
+          ? "ComfyUI"
+          : "—",
+    ],
     ["公开节点名称", data.endpoint_public_name || "生成节点"],
     ["指定节点", data.requested_endpoint_id || "自动分配"],
+    ["来源网关", data.origin_gateway_id || "本机"],
+    ["链路跳数", data.hop ?? 0],
+    ["远程状态", data.remote?.remote_status || "—"],
+    ["远程任务 ID", data.remote?.remote_job_id || "—"],
+    ["远程错误", data.remote?.last_error || "—"],
     [
       "LoRA",
       data.lora_disabled
@@ -2988,7 +3125,16 @@ function renderAccountRows(items) {
   }
   for (const item of items) {
     const row = el("tr");
-    const nameCell = el("td", "admin-nowrap", item.username);
+    const nameCell = el("td", "admin-nowrap");
+    nameCell.appendChild(el("span", "", item.username));
+    if (item.is_gateway) {
+      const badge = el("span", "state-pill gateway", "网关");
+      badge.style.marginLeft = "6px";
+      badge.title = item.bound_gateway_id
+        ? `已绑定上游 ${item.bound_gateway_id}`
+        : "已标记为网关账号";
+      nameCell.appendChild(badge);
+    }
     nameCell.title = item.account_id;
     row.appendChild(nameCell);
     const idCell = el("td", "admin-account-id");
@@ -3049,6 +3195,13 @@ function renderAccountRows(items) {
         "重置密码",
         ["M12 20h9", "M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"],
         () => resetAccountPassword(item),
+      ),
+    );
+    wrap.appendChild(
+      nodeActionButton(
+        item.is_gateway ? "取消网关账号" : "设为网关账号",
+        ["M12 3v18", "M3 12h18"],
+        () => configureAccountGateway(item),
       ),
     );
     actions.appendChild(wrap);
@@ -3120,6 +3273,48 @@ async function resetAccountPassword(item) {
   }
 }
 
+async function configureAccountGateway(item) {
+  const message = document.querySelector("#account-message");
+  if (item.is_gateway) {
+    if (!window.confirm(`取消「${item.username}」的网关账号标记？`)) return;
+    try {
+      await api(`/api/admin/accounts/${item.account_id}/gateway`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ is_gateway: false }),
+      });
+      setMessage(message, "已取消网关账号标记");
+      loadAccounts();
+    } catch (error) {
+      setMessage(message, error.message, true);
+    }
+    return;
+  }
+  const gatewayId = window.prompt(
+    "输入上游网关 ID（对方网关 /api/gateway/info 返回的 gateway_id）",
+    "",
+  );
+  if (gatewayId === null) return;
+  if (!gatewayId.trim()) {
+    setMessage(message, "网关 ID 不能为空", true);
+    return;
+  }
+  try {
+    await api(`/api/admin/accounts/${item.account_id}/gateway`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        is_gateway: true,
+        gateway_id: gatewayId.trim(),
+      }),
+    });
+    setMessage(message, "已设为网关账号");
+    loadAccounts();
+  } catch (error) {
+    setMessage(message, error.message, true);
+  }
+}
+
 let activeAccountId = null;
 let activeAccountName = "";
 
@@ -3139,7 +3334,7 @@ async function loadAccountDetail(item) {
     el(
       "span",
       "",
-      `ID ${item.account_id} · 注册 IP ${item.register_ip || "—"} · 状态 ${accountStatusLabel(item.status)} · 剩余额度（不含免费） ${remainingQuota}`,
+      `ID ${item.account_id} · 注册 IP ${item.register_ip || "—"} · 状态 ${accountStatusLabel(item.status)} · 剩余额度（不含免费） ${remainingQuota} · 网关账号 ${item.is_gateway ? `（上游 ${item.bound_gateway_id || "未绑定"}）` : "否"}`,
     ),
   );
   detailNote.appendChild(copyButton("复制 ID", item.account_id));
@@ -3659,6 +3854,7 @@ document.querySelector("#ratelimit-exemption-refresh").addEventListener("click",
 document.querySelector("#node-save").addEventListener("click", saveNode);
 document.querySelector("#node-cancel-edit").addEventListener("click", resetNodeForm);
 document.querySelector("#node-refresh").addEventListener("click", loadNodes);
+document.querySelector("#node-kind").addEventListener("change", syncNodeKindFields);
 
 document.querySelector("#lora-save").addEventListener("click", saveLora);
 document.querySelector("#lora-cancel-edit").addEventListener("click", resetLoraForm);

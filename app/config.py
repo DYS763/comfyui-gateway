@@ -86,6 +86,13 @@ class Settings:
     )
     submit_rate_limit_max: int = int(os.getenv("SUBMIT_RATE_LIMIT_MAX", "3"))
     forwarded_allow_ips: str = os.getenv("FORWARDED_ALLOW_IPS", "127.0.0.1")
+    gateway_max_hops: int = int(os.getenv("GATEWAY_MAX_HOPS", "3"))
+    gateway_request_timeout_seconds: float = float(
+        os.getenv("GATEWAY_REQUEST_TIMEOUT", "30")
+    )
+    remote_credentials_key_file: Path = _env_path(
+        "REMOTE_CREDENTIALS_KEY_FILE", PROJECT_ROOT / "data" / ".remote-credentials.key"
+    )
     admin_username: str = os.getenv("ADMIN_USERNAME", "")
     admin_password: str = os.getenv("ADMIN_PASSWORD", "")
     admin_session_hours: float = float(os.getenv("ADMIN_SESSION_HOURS", "8"))

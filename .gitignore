@@ -12,4 +12,5 @@ data/logs/
 data/keys.txt
 data/keys.txt.lock
 data/generated-keys-*.txt
-
+data/.remote-credentials.key
+docs/

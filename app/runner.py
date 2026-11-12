@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import mimetypes
 import shutil
@@ -10,9 +11,25 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+from .capabilities import (
+    default_capabilities,
+    endpoint_capabilities,
+    match_capabilities,
+    parse_capabilities,
+    task_requirement,
+)
 from .comfy import ComfyClient, ComfyError
 from .config import Settings
+from .crypto import CredentialCipher, CredentialError
 from .database import Database, iso, parse_iso, utc_now
+from .gateway_client import (
+    GatewayClient,
+    GatewayClientPool,
+    GatewayError,
+    call_gateway,
+    record_gateway_error,
+    refresh_gateway_endpoint,
+)
 from .image_audit import ImageAuditLog
 from .nodes import EndpointClientPool, NodeHealthMonitor
 from .private_gallery import cleanup_private_galleries
@@ -24,6 +41,8 @@ logger = logging.getLogger("comfy_gateway.runner")
 _AUTO_CLEANUP_INTERVAL_SECONDS = 60.0
 _HISTORY_RECOVERY_RETRY_SECONDS = 60.0
 _DISPATCH_LEASE_SECONDS = 60.0
+_GATEWAY_PROBE_SECONDS = 30.0
+_REMOTE_POLL_SECONDS = 3.0
 _MAX_DISPATCH_SWITCHES = 3
 _UNRECOVERABLE_ERROR_HINTS = (
     "prompt_outputs_failed_validation",
@@ -55,6 +74,8 @@ class JobRunner:
         audit: ImageAuditLog,
         *,
         clients: EndpointClientPool | None = None,
+        cipher: CredentialCipher | None = None,
+        gateway_clients: GatewayClientPool | None = None,
     ):
         self.db = db
         self.comfy = comfy
@@ -64,6 +85,14 @@ class JobRunner:
         self.clients = clients or EndpointClientPool(
             timeout=settings.comfy_timeout_seconds
         )
+        self.cipher = cipher or CredentialCipher(
+            settings.remote_credentials_key_file
+        )
+        self.gateway_clients = gateway_clients or GatewayClientPool(
+            self.cipher, settings.gateway_request_timeout_seconds
+        )
+        self.gateway_id = db.ensure_gateway_id(utc_now(), settings.gateway_max_hops)
+        self.max_hops = db.gateway_max_hops(settings.gateway_max_hops)
         self.health = NodeHealthMonitor(self.db, self.clients)
         self.jobs_dir = settings.jobs_dir
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
@@ -73,6 +102,8 @@ class JobRunner:
         self._history_recovery_done = False
         self._last_history_recovery = 0.0
         self._recovered_endpoints: set[str] = set()
+        self._gateway_probe_at: dict[str, float] = {}
+        self._remote_last_poll: dict[str, float] = {}
         self._thread = threading.Thread(target=self._run, name="comfy-job-runner", daemon=True)
 
     def start(self) -> None:
@@ -91,6 +122,7 @@ class JobRunner:
             try:
                 now = utc_now()
                 endpoints = self.health.probe_all(time.monotonic(), now)
+                self._probe_gateway_endpoints(time.monotonic(), now)
                 self._migrate_offline_tasks(endpoints, now)
                 self._fail_invalid_requested_tasks(endpoints)
                 self._reconcile_auto_pause(endpoints)
@@ -106,6 +138,7 @@ class JobRunner:
                 self._recover_lost_prompt_ids()
                 self._submit_queued()
                 self._poll_active()
+                self._poll_remote_jobs()
             except Exception:
                 logger.exception("job runner loop failed")
             self._wake.wait(self.settings.comfy_poll_seconds)
@@ -131,6 +164,34 @@ class JobRunner:
         if status["paused"] and status["pause_reason"] == "no_nodes":
             self.db.set_queue_state(False, "", utc_now(), "runner")
             logger.warning("queue auto-resumed: ComfyUI node available")
+
+    def _probe_gateway_endpoints(self, monotonic_now: float, now: Any) -> None:
+        endpoints = self.db.list_endpoints()
+        self.gateway_clients.prune(endpoints)
+        for endpoint in endpoints:
+            if not endpoint.get("enabled") or endpoint.get("kind") != "gateway":
+                continue
+            last = self._gateway_probe_at.get(endpoint["id"])
+            if last is not None and monotonic_now - last < _GATEWAY_PROBE_SECONDS:
+                continue
+            self._gateway_probe_at[endpoint["id"]] = monotonic_now
+            client = self.gateway_clients.get(endpoint)
+            try:
+                refresh_gateway_endpoint(self.db, self.cipher, endpoint, client)
+            except GatewayError as exc:
+                logger.warning(
+                    "gateway node %s probe failed: %s", endpoint["id"], exc
+                )
+                record_gateway_error(self.db, endpoint, exc)
+            except CredentialError as exc:
+                logger.warning(
+                    "gateway node %s credentials invalid: %s", endpoint["id"], exc
+                )
+                record_gateway_error(
+                    self.db,
+                    endpoint,
+                    GatewayError(str(exc), kind="config"),
+                )
 
     def _auto_cleanup(self, now: Any) -> None:
         monotonic = time.monotonic()
@@ -228,6 +289,11 @@ class JobRunner:
         ]
         if not queued:
             return
+        defaults = default_capabilities(self.db)
+        capabilities = {
+            endpoint["id"]: endpoint_capabilities(endpoint, defaults)
+            for endpoint in endpoints
+        }
         endpoints_by_id = {endpoint["id"]: endpoint for endpoint in endpoints}
         loads = {
             endpoint["id"]: self.db.count_endpoint_in_flight(endpoint["id"], now)
@@ -241,6 +307,7 @@ class JobRunner:
                         continue
                 except (ValueError, TypeError):
                     pass
+            requirement = task_requirement(task)
             requested_id = task.get("requested_endpoint_id")
             if requested_id:
                 endpoint = endpoints_by_id.get(requested_id)
@@ -258,21 +325,18 @@ class JobRunner:
                         "requested_node_unavailable",
                     )
                     continue
+                reason = match_capabilities(capabilities[endpoint["id"]], requirement)
+                if reason:
+                    self._fail_capability(task, reason)
+                    continue
                 if endpoint.get("health_state") != "online":
-                    if task["status"] != "waiting_node":
-                        self.db.update_task(
-                            task["id"],
-                            status="waiting_node",
-                            queue_position=None,
-                        )
+                    self._set_waiting(task)
+                    continue
+                if self._endpoint_insufficient_balance(endpoint):
+                    self._set_waiting(task)
                     continue
                 if loads[endpoint["id"]] >= int(endpoint["max_concurrency"]):
-                    if task["status"] != "waiting_node":
-                        self.db.update_task(
-                            task["id"],
-                            status="waiting_node",
-                            queue_position=None,
-                        )
+                    self._set_waiting(task)
                     continue
                 if not self._dispatch_to_endpoint(task, endpoint, now):
                     continue
@@ -280,11 +344,21 @@ class JobRunner:
                 continue
             if task["status"] != "queued":
                 continue
-            candidates = [
+            eligible = [
                 endpoint
                 for endpoint in endpoints
                 if endpoint.get("enabled")
-                and endpoint.get("health_state") == "online"
+                and match_capabilities(capabilities[endpoint["id"]], requirement)
+                is None
+            ]
+            if not eligible:
+                self._fail_capability(task, "没有节点支持该任务的参数")
+                continue
+            candidates = [
+                endpoint
+                for endpoint in eligible
+                if endpoint.get("health_state") == "online"
+                and not self._endpoint_insufficient_balance(endpoint)
                 and loads[endpoint["id"]] < int(endpoint["max_concurrency"])
             ]
             if not candidates:
@@ -294,11 +368,36 @@ class JobRunner:
                 continue
             loads[endpoint["id"]] += 1
 
+    def _set_waiting(self, task: dict[str, Any]) -> None:
+        if task["status"] != "waiting_node":
+            self.db.update_task(
+                task["id"],
+                status="waiting_node",
+                queue_position=None,
+            )
+
+    @staticmethod
+    def _endpoint_insufficient_balance(endpoint: dict[str, Any]) -> bool:
+        if endpoint.get("kind") != "gateway":
+            return False
+        balance = endpoint.get("remote_balance")
+        return balance is not None and int(balance) < 1
+
+    def _fail_capability(self, task: dict[str, Any], reason: str) -> None:
+        self.db.update_task(task["id"], failure_reason="capability_mismatch")
+        self._mark_failed(
+            task["id"], f"没有可用的节点：{reason}", clear_queue=True
+        )
+        logger.error(
+            "job %s failed capability check: %s", task["id"], reason
+        )
+
     @staticmethod
     def _select_endpoint(candidates: list[dict[str, Any]]) -> dict[str, Any]:
         return min(
             candidates,
             key=lambda endpoint: (
+                1 if endpoint.get("kind") == "gateway" else 0,
                 endpoint.get("last_task_completed_at") is not None,
                 endpoint.get("last_task_completed_at") or "",
                 endpoint.get("created_at") or "",
@@ -322,6 +421,8 @@ class JobRunner:
     def _dispatch_to_endpoint(
         self, task: dict[str, Any], endpoint: dict[str, Any], now: Any
     ) -> bool:
+        if endpoint.get("kind") == "gateway":
+            return self._dispatch_remote(task, endpoint, now)
         job_id = task["id"]
         client = self.clients.get(endpoint)
         lease_end = now + timedelta(seconds=_DISPATCH_LEASE_SECONDS)
@@ -458,6 +559,509 @@ class JobRunner:
             prompt_id,
         )
         return True
+
+    @staticmethod
+    def _visited(task: dict[str, Any]) -> list[str]:
+        raw = task.get("visited_json")
+        if not raw:
+            return []
+        try:
+            value = json.loads(raw)
+        except (TypeError, ValueError):
+            return []
+        if not isinstance(value, list):
+            return []
+        visited: list[str] = []
+        for item in value:
+            text = str(item).strip()
+            if text and text not in visited:
+                visited.append(text)
+        return visited
+
+    @staticmethod
+    def _remote_lora_id(endpoint: dict[str, Any], name: str | None) -> Any:
+        if not name:
+            return None
+        caps = parse_capabilities(endpoint.get("remote_capabilities_json")) or {}
+        for item in caps.get("loras") or []:
+            if isinstance(item, dict) and str(item.get("display_name") or "") == name:
+                return item.get("id")
+        return None
+
+    def _release_dispatch(self, job_id: str) -> None:
+        self.db.update_task(
+            job_id,
+            endpoint_id=None,
+            endpoint_name_snapshot=None,
+            endpoint_public_name_snapshot=None,
+            dispatch_claimed_at=None,
+            dispatch_lease_expires_at=None,
+            queue_position=None,
+        )
+
+    def _dispatch_remote(
+        self, task: dict[str, Any], endpoint: dict[str, Any], now: Any
+    ) -> bool:
+        job_id = task["id"]
+        client = self.gateway_clients.get(endpoint)
+        lease_end = now + timedelta(seconds=_DISPATCH_LEASE_SECONDS)
+        self.db.update_task(
+            job_id,
+            endpoint_id=endpoint["id"],
+            endpoint_name_snapshot=endpoint["name"],
+            endpoint_public_name_snapshot=endpoint.get("public_name") or "",
+            dispatch_claimed_at=iso(now),
+            dispatch_lease_expires_at=iso(lease_end),
+            queue_position=None,
+        )
+        origin = task.get("origin_gateway_id") or self.gateway_id
+        hop = int(task.get("hop") or 0) + 1
+        visited = self._visited(task)
+        if self.gateway_id not in visited:
+            visited.append(self.gateway_id)
+        payload: dict[str, Any] = {
+            "use_account_quota": True,
+            "prompt": task["prompt"],
+            "negative_prompt": task.get("negative_prompt"),
+            "steps": task.get("steps"),
+            "seed": task.get("seed"),
+            "width": task.get("width"),
+            "height": task.get("height"),
+            "qq_group": task.get("qq_group"),
+            "qq_group_name": task.get("qq_group_name"),
+            "qq_number": task.get("qq_number"),
+            "qq_name": task.get("qq_name"),
+            "client_request_id": f"{self.gateway_id}:{job_id}",
+            "origin_gateway_id": origin,
+            "hop": hop,
+            "visited": visited,
+            "profile": task.get("profile") or "default",
+        }
+        if task.get("layout_json"):
+            try:
+                payload["layout"] = json.loads(task["layout_json"])
+            except (TypeError, ValueError):
+                self._release_dispatch(job_id)
+                self._fail_unrecoverable(task, "layout 数据无效", "invalid layout")
+                return False
+            payload["prompt"] = ""
+        if task.get("lora_disabled"):
+            payload["disable_lora"] = True
+        elif task.get("lora_id"):
+            lora_name = task.get("lora_name_snapshot")
+            remote_lora_id = self._remote_lora_id(endpoint, lora_name)
+            if remote_lora_id is None:
+                self._release_dispatch(job_id)
+                self._fail_capability(task, f"远程节点缺少 LoRA {lora_name}")
+                return False
+            payload["lora_id"] = remote_lora_id
+            if task.get("lora_strength") is not None:
+                payload["lora_strength"] = task.get("lora_strength")
+        try:
+            response = call_gateway(
+                self.db, self.cipher, endpoint, client, lambda item: item.submit(payload)
+            )
+        except GatewayError as exc:
+            logger.warning(
+                "job %s dispatch to gateway %s failed: %s",
+                job_id,
+                endpoint["id"],
+                exc,
+            )
+            self._release_dispatch(job_id)
+            self._handle_remote_submit_error(task, endpoint, exc)
+            return False
+        query_token = response.get("query_token")
+        remote_task = response.get("task")
+        remote_job_id = (
+            remote_task.get("job_id") if isinstance(remote_task, dict) else None
+        )
+        if not query_token or not remote_job_id:
+            self._release_dispatch(job_id)
+            self._fail_unrecoverable(
+                task, "远程节点返回数据无效", "invalid remote response"
+            )
+            return False
+        current = self.db.get_task(job_id)
+        if not current or current["status"] not in {
+            "queued",
+            "waiting_node",
+            "submitted",
+            "running",
+        }:
+            try:
+                call_gateway(
+                    self.db,
+                    self.cipher,
+                    endpoint,
+                    client,
+                    lambda item: item.cancel(str(remote_job_id)),
+                )
+            except GatewayError as exc:
+                logger.warning(
+                    "could not cancel discarded remote job %s: %s",
+                    remote_job_id,
+                    exc,
+                )
+            return False
+        submitted_at = utc_now()
+        try:
+            encrypted_token = self.cipher.encrypt(str(query_token))
+        except CredentialError as exc:
+            self._release_dispatch(job_id)
+            self._fail_unrecoverable(task, "远程取图凭证无法保存", str(exc))
+            return False
+        self.db.create_remote_job(
+            local_job_id=job_id,
+            endpoint_id=endpoint["id"],
+            client_request_id=payload["client_request_id"],
+            remote_job_id=str(remote_job_id),
+            query_token_encrypted=encrypted_token,
+            remote_status=str(remote_task.get("status") or "accepted"),
+            submitted_at=submitted_at,
+            created_at=submitted_at,
+        )
+        self.db.add_task_binding(
+            job_id=job_id,
+            endpoint_id=endpoint["id"],
+            endpoint_name=endpoint["name"],
+            endpoint_public_name=endpoint.get("public_name") or "",
+            comfy_prompt_id=None,
+            state="active",
+            created_at=submitted_at,
+            last_progress_at=submitted_at,
+            reward_account_id=None,
+        )
+        self.db.update_task(
+            job_id,
+            status="submitted",
+            submitted_at=iso(submitted_at),
+            last_progress_at=iso(submitted_at),
+            queue_position=None,
+            dispatch_claimed_at=None,
+            dispatch_lease_expires_at=None,
+            error_message=None,
+        )
+        self._update_metadata(
+            job_id,
+            status="submitted",
+            submitted_at=iso(submitted_at),
+            error=None,
+        )
+        logger.info(
+            "job %s submitted to gateway %s as %s",
+            job_id,
+            endpoint["id"],
+            remote_job_id,
+        )
+        return True
+
+    def _handle_remote_submit_error(
+        self, task: dict[str, Any], endpoint: dict[str, Any], exc: GatewayError
+    ) -> None:
+        job_id = task["id"]
+        now = utc_now()
+        self.db.update_endpoint(
+            endpoint["id"], updated_at=now, remote_last_error=str(exc)
+        )
+        if exc.kind == "quota":
+            self.db.update_endpoint(
+                endpoint["id"],
+                updated_at=now,
+                remote_balance=0,
+                remote_balance_updated_at=iso(now),
+            )
+            logger.warning(
+                "gateway node %s is out of quota; job %s will wait",
+                endpoint["id"],
+                job_id,
+            )
+            return
+        if exc.retryable or exc.kind in {"auth", "rate_limit"}:
+            logger.warning("job %s remote submit deferred: %s", job_id, exc)
+            return
+        self.db.update_task(
+            job_id, failure_reason=f"remote_submit_failed: {exc}"
+        )
+        self._mark_failed(job_id, f"远程节点拒绝了任务：{exc}", clear_queue=True)
+
+    def _discard_remote_job(self, job_id: str) -> None:
+        job = self.db.get_remote_job(job_id)
+        if not job:
+            return
+        endpoint = self.db.get_endpoint(job["endpoint_id"])
+        if endpoint and job.get("remote_job_id"):
+            client = self.gateway_clients.get(endpoint)
+            try:
+                call_gateway(
+                    self.db,
+                    self.cipher,
+                    endpoint,
+                    client,
+                    lambda item: item.cancel(str(job["remote_job_id"])),
+                )
+            except GatewayError as exc:
+                logger.warning(
+                    "could not cancel remote job %s: %s",
+                    job["remote_job_id"],
+                    exc,
+                )
+        self.db.delete_remote_job(job_id)
+        self._remote_last_poll.pop(job_id, None)
+
+    def _poll_remote_jobs(self) -> None:
+        jobs = self.db.list_remote_jobs(active_only=True)
+        if not jobs:
+            return
+        endpoints = {endpoint["id"]: endpoint for endpoint in self.db.list_endpoints()}
+        monotonic = time.monotonic()
+        now = utc_now()
+        for job in jobs:
+            job_id = job["local_job_id"]
+            last = self._remote_last_poll.get(job_id)
+            if last is not None and monotonic - last < _REMOTE_POLL_SECONDS:
+                continue
+            self._remote_last_poll[job_id] = monotonic
+            task = self.db.get_task(job_id)
+            if not task or task["status"] not in {
+                "queued",
+                "waiting_node",
+                "submitted",
+                "running",
+            }:
+                continue
+            timeout_base = task.get("last_progress_at") or task.get("submitted_at")
+            if timeout_base:
+                try:
+                    if (
+                        now - parse_iso(timeout_base)
+                    ).total_seconds() > self.settings.node_no_progress_timeout_seconds:
+                        self._migrate_task(task, "远程任务长时间无进展", now)
+                        continue
+                except (TypeError, ValueError):
+                    pass
+            endpoint = endpoints.get(job["endpoint_id"])
+            if not endpoint:
+                self._fail_remote_task(task, "远程节点已被删除")
+                continue
+            try:
+                token = self.cipher.decrypt(job.get("query_token_encrypted") or "")
+            except CredentialError as exc:
+                self._fail_remote_task(task, f"远程取图凭证无效：{exc}")
+                continue
+            client = self.gateway_clients.get(endpoint)
+            try:
+                data = call_gateway(
+                    self.db, self.cipher, endpoint, client, lambda item: item.query(token)
+                )
+            except GatewayError as exc:
+                if exc.status_code in {404, 410}:
+                    self._fail_remote_task(task, "远程任务已丢失或过期")
+                    continue
+                self.db.update_remote_job(job_id, last_error=str(exc))
+                logger.warning("could not poll remote job %s: %s", job_id, exc)
+                continue
+            remote_task = data.get("task") if isinstance(data.get("task"), dict) else {}
+            status = str(remote_task.get("status") or "")
+            if status in {"queued", "waiting_node"}:
+                self._update_remote_progress(task, "submitted", status)
+            elif status in {"submitted", "running"}:
+                self._update_remote_progress(task, "running", status)
+            elif status == "completed":
+                self._fetch_remote_result(task, endpoint, client, token)
+            elif status == "failed":
+                self._fail_remote_task(
+                    task,
+                    remote_task.get("error") or "远程节点生成失败",
+                )
+            elif status == "expired":
+                self._expire_remote_task(task, "远程任务已过期")
+            else:
+                self.db.update_remote_job(
+                    job_id, last_error=f"unknown remote status: {status}"
+                )
+
+    def _update_remote_progress(
+        self, task: dict[str, Any], status: str, remote_status: str
+    ) -> None:
+        now = utc_now()
+        current = self.db.get_task(task["id"])
+        if not current or current["status"] not in {
+            "queued",
+            "waiting_node",
+            "submitted",
+            "running",
+        }:
+            return
+        self.db.update_task(
+            task["id"],
+            status=status,
+            last_checked_at=iso(now),
+            last_progress_at=iso(now),
+            queue_position=None,
+        )
+        self.db.update_remote_job(task["id"], remote_status=remote_status)
+
+    def _fetch_remote_result(
+        self,
+        task: dict[str, Any],
+        endpoint: dict[str, Any],
+        client: GatewayClient,
+        token: str,
+    ) -> None:
+        try:
+            content, content_type = call_gateway(
+                self.db,
+                self.cipher,
+                endpoint,
+                client,
+                lambda item: item.result(token),
+            )
+        except GatewayError as exc:
+            if exc.status_code == 410:
+                self._expire_remote_task(task, "远程结果已过期")
+                return
+            retries = int(task.get("download_retry_count") or 0)
+            limit = max(0, self.settings.comfy_download_retry_max)
+            if retries < limit:
+                self.db.update_task(
+                    task["id"],
+                    download_retry_count=retries + 1,
+                    last_checked_at=iso(utc_now()),
+                    error_message=str(exc),
+                )
+                logger.warning(
+                    "could not download remote result for job %s (%s/%s): %s",
+                    task["id"],
+                    retries + 1,
+                    limit,
+                    exc,
+                )
+                return
+            self._fail_remote_task(task, f"远程结果下载失败：{exc}")
+            return
+        suffix = mimetypes.guess_extension(content_type or "") or ".png"
+        if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
+            suffix = ".png"
+        binding = self.db.get_active_binding(task["id"])
+        self._finalize_result(
+            task,
+            content,
+            suffix,
+            endpoint["id"],
+            None,
+            binding,
+        )
+        try:
+            call_gateway(
+                self.db,
+                self.cipher,
+                endpoint,
+                client,
+                lambda item: item.destroy(token),
+            )
+        except GatewayError as exc:
+            logger.warning(
+                "could not destroy remote image for job %s: %s", task["id"], exc
+            )
+        now = utc_now()
+        self.db.update_remote_job(
+            task["id"],
+            remote_status="destroyed",
+            result_fetched_at=iso(now),
+            destroyed_at=iso(now),
+            last_error=None,
+        )
+        self._remote_last_poll.pop(task["id"], None)
+
+    def _fail_remote_task(self, task: dict[str, Any], message: str) -> None:
+        self.db.update_remote_job(
+            task["id"], remote_status="failed", last_error=message
+        )
+        self.db.update_task(task["id"], failure_reason="remote_failed")
+        self._mark_failed(task["id"], message, clear_queue=True)
+        self._remote_last_poll.pop(task["id"], None)
+        logger.error("remote job %s failed: %s", task["id"], message)
+
+    def _expire_remote_task(self, task: dict[str, Any], message: str) -> None:
+        now = utc_now()
+        self.db.update_task(
+            task["id"],
+            status="expired",
+            failure_reason="remote_expired",
+            error_message=message,
+            last_checked_at=iso(now),
+            queue_position=None,
+        )
+        self.db.update_remote_job(
+            task["id"], remote_status="expired", last_error=message
+        )
+        try:
+            self.db.refund_account_charge(
+                job_id=task["id"],
+                now=now,
+                free_limit=self._free_daily_quota(),
+                note="remote_expired",
+            )
+        except Exception:
+            logger.exception("could not refund expired remote job %s", task["id"])
+        self._update_metadata(
+            task["id"],
+            status="expired",
+            error=message,
+            failed_at=iso(now),
+        )
+        self._remote_last_poll.pop(task["id"], None)
+
+    def cancel_task(self, job_id: str) -> dict[str, Any]:
+        task = self.db.get_task(job_id)
+        if not task or task["status"] not in {
+            "queued",
+            "waiting_node",
+            "submitted",
+            "running",
+        }:
+            return {"cancelled": False, "refunded": False}
+        refundable = bool(task.get("charge_bucket"))
+        remote = self.db.get_remote_job(job_id)
+        if remote:
+            endpoint = self.db.get_endpoint(remote["endpoint_id"])
+            if endpoint and remote.get("remote_job_id"):
+                client = self.gateway_clients.get(endpoint)
+                try:
+                    call_gateway(
+                        self.db,
+                        self.cipher,
+                        endpoint,
+                        client,
+                        lambda item: item.cancel(str(remote["remote_job_id"])),
+                    )
+                except GatewayError as exc:
+                    logger.warning(
+                        "could not cancel remote job %s: %s", job_id, exc
+                    )
+            self.db.update_remote_job(job_id, remote_status="cancelled")
+        binding = self.db.get_active_binding(job_id)
+        if binding:
+            self.db.set_binding_state(
+                binding["id"], "discarded", updated_at=utc_now()
+            )
+            if binding["state"] == "active":
+                self._cancel_binding(binding)
+        cancelled = self.db.cancel_active_task(
+            job_id,
+            now=utc_now(),
+            free_limit=self._free_daily_quota(),
+            message="任务已取消",
+        )
+        if cancelled:
+            now = utc_now()
+            self._update_metadata(
+                job_id, status="failed", error="任务已取消", failed_at=iso(now)
+            )
+            self._remote_last_poll.pop(job_id, None)
+            logger.info("job %s cancelled", job_id)
+        return {"cancelled": cancelled, "refunded": refundable and cancelled}
 
     def _migrate_offline_tasks(
         self, endpoints: list[dict[str, Any]], now: Any
@@ -605,6 +1209,7 @@ class JobRunner:
         self, task: dict[str, Any], reason: str, now: Any
     ) -> bool:
         job_id = task["id"]
+        self._discard_remote_job(job_id)
         if task.get("requested_endpoint_id"):
             unavailable = "离线" in reason
             reason_code = (
@@ -708,6 +1313,9 @@ class JobRunner:
         self._last_history_recovery = monotonic
         for endpoint in endpoints:
             if endpoint["id"] in self._recovered_endpoints:
+                continue
+            if endpoint.get("kind") == "gateway":
+                self._recovered_endpoints.add(endpoint["id"])
                 continue
             if self._recover_endpoint_bindings(endpoint):
                 self._recovered_endpoints.add(endpoint["id"])
@@ -1340,14 +1948,6 @@ class JobRunner:
         suffix = Path(image.get("filename", "result.png")).suffix.lower()
         if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
             suffix = ".png"
-        job_dir = self.jobs_dir / job_id
-        job_dir.mkdir(parents=True, exist_ok=True)
-        result_path = job_dir / f"result{suffix}"
-        result_path.write_bytes(content)
-        media_type = mimetypes.guess_type(result_path.name)[0] or "application/octet-stream"
-        result_sha256 = hashlib.sha256(content).hexdigest()
-        now = utc_now()
-        expires_at = now + timedelta(hours=self.settings.result_ttl_hours)
         source_endpoint_id = (
             binding["endpoint_id"] if binding else task.get("endpoint_id")
         )
@@ -1356,10 +1956,47 @@ class JobRunner:
             if binding
             else task.get("comfy_prompt_id")
         )
+        self._finalize_result(
+            task,
+            content,
+            suffix,
+            source_endpoint_id,
+            source_prompt_id,
+            binding,
+        )
+
+    def _finalize_result(
+        self,
+        task: dict[str, Any],
+        content: bytes,
+        suffix: str,
+        endpoint_id: str | None,
+        prompt_id: str | None,
+        binding: dict[str, Any] | None,
+    ) -> None:
+        job_id = task["id"]
+        current = self.db.get_task(job_id)
+        if not current or current["status"] in {"completed", "failed", "expired"}:
+            if binding:
+                self.db.set_binding_state(
+                    binding["id"], "discarded", updated_at=utc_now()
+                )
+            logger.warning("duplicate result discarded for job %s", job_id)
+            return
+        if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
+            suffix = ".png"
+        job_dir = self.jobs_dir / job_id
+        job_dir.mkdir(parents=True, exist_ok=True)
+        result_path = job_dir / f"result{suffix}"
+        result_path.write_bytes(content)
+        media_type = mimetypes.guess_type(result_path.name)[0] or "application/octet-stream"
+        result_sha256 = hashlib.sha256(content).hexdigest()
+        now = utc_now()
+        expires_at = now + timedelta(hours=self.settings.result_ttl_hours)
         try:
             self.audit.image_generated(
                 generation_id=job_id,
-                comfy_prompt_id=source_prompt_id,
+                comfy_prompt_id=prompt_id,
                 prompt=task["prompt"],
                 negative_prompt=task.get("negative_prompt"),
                 steps=task.get("steps"),
@@ -1380,6 +2017,7 @@ class JobRunner:
             "expires_at": iso(expires_at),
             "last_checked_at": iso(now),
             "error_message": None,
+            "comfy_prompt_id": prompt_id,
         }
         if binding:
             updates.update(
@@ -1388,7 +2026,6 @@ class JobRunner:
                 endpoint_public_name_snapshot=binding.get(
                     "endpoint_public_name"
                 ),
-                comfy_prompt_id=binding.get("comfy_prompt_id"),
             )
         self.db.update_task(job_id, **updates)
         winning_binding_id = binding["id"] if binding else None
@@ -1423,8 +2060,8 @@ class JobRunner:
             result_sha256=result_sha256,
             error=None,
         )
-        if source_endpoint_id:
-            self.db.mark_endpoint_task_completed(source_endpoint_id, now)
+        if endpoint_id:
+            self.db.mark_endpoint_task_completed(endpoint_id, now)
         try:
             self.db.settle_endpoint_reward(job_id=job_id, now=now)
         except Exception:

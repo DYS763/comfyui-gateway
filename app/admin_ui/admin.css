@@ -270,6 +270,7 @@
 .admin-table tbody tr.admin-task-row.selected { background: #fff2cf; box-shadow: inset 3px 0 0 #e5a000; }
 .admin-table td button { min-height: 30px; padding: 0 12px; font-size: .74rem; }
 .admin-table .state-pill { min-height: 24px; padding: 0 10px; font-size: .72rem; white-space: nowrap; }
+.admin-table .state-pill.gateway { background: #e8f0ff; color: #2452b8; border-color: #c7d8ff; }
 
 .admin-report-work { display: flex; align-items: center; gap: 10px; min-width: 190px; }
 .admin-report-thumb {
