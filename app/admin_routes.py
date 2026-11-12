@@ -326,7 +326,9 @@ def _endpoint_item(endpoint: dict[str, Any], in_flight: int) -> dict[str, Any]:
     item = {
         key: value for key, value in endpoint.items() if key not in hidden
     }
-    item["has_password"] = bool(endpoint.get("remote_password_encrypted"))
+    item["has_remote_credentials"] = bool(
+        endpoint.get("remote_password_encrypted")
+    )
     item["has_session"] = bool(endpoint.get("remote_session_encrypted"))
     item["status"] = _endpoint_status(endpoint, in_flight)
     item["in_flight"] = in_flight

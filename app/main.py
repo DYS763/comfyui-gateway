@@ -203,96 +203,88 @@ def _gateway_link(
             status_code=422,
             detail={"code": "invalid_link", "message": "链路网关标识过长"},
         )
-    is_gateway_account = bool(account_row and account_row.get("is_gateway"))
-    if is_gateway_account:
-        if not payload.use_account_quota:
-            raise HTTPException(
-                status_code=403,
-                detail={
-                    "code": "gateway_quota_required",
-                    "message": "网关账号必须使用账号额度提交",
-                },
-            )
-        bound = (account_row.get("bound_gateway_id") or "").strip()
-        if not origin:
-            raise HTTPException(
-                status_code=403,
-                detail={
-                    "code": "gateway_identity_required",
-                    "message": "网关账号提交时必须声明来源网关",
-                },
-            )
-        if not bound:
-            raise HTTPException(
-                status_code=403,
-                detail={
-                    "code": "gateway_binding_missing",
-                    "message": "网关账号尚未绑定上游网关",
-                },
-            )
-        if not visited:
-            raise HTTPException(
-                status_code=422,
-                detail={"code": "invalid_link", "message": "链路信息不完整"},
-            )
-        if visited[-1] != bound:
-            raise HTTPException(
-                status_code=403,
-                detail={
-                    "code": "gateway_mismatch",
-                    "message": "直接上游网关与账号绑定不一致",
-                },
-            )
-        if origin not in visited:
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "code": "invalid_link",
-                    "message": "来源网关必须出现在链路中",
-                },
-            )
-        if not client_request_id:
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "code": "client_request_required",
-                    "message": "网关账号提交时必须提供 client_request_id",
-                },
-            )
-        if payload.hop < 1:
-            raise HTTPException(
-                status_code=422,
-                detail={"code": "invalid_link", "message": "链路跳数不正确"},
-            )
-        hop = int(payload.hop)
-        if hop > GATEWAY_MAX_HOPS:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "code": "max_hops_exceeded",
-                    "message": "链路跳数超过上限",
-                },
-            )
-        if GATEWAY_ID in visited:
-            raise HTTPException(
-                status_code=409,
-                detail={"code": "gateway_loop", "message": "检测到网关环路"},
-            )
-        if origin == GATEWAY_ID:
-            raise HTTPException(
-                status_code=409,
-                detail={"code": "gateway_loop", "message": "检测到网关环路"},
-            )
-        return origin, hop, visited, client_request_id
-    if origin or client_request_id or visited or payload.hop:
+    has_link_fields = bool(origin or client_request_id or visited or payload.hop)
+    if not has_link_fields:
+        return GATEWAY_ID, 0, [], None
+    if not account_row:
         raise HTTPException(
             status_code=403,
             detail={
-                "code": "gateway_fields_forbidden",
-                "message": "普通账号不能携带网关链路字段",
+                "code": "gateway_quota_required",
+                "message": "网关链路提交必须使用账号额度",
             },
         )
-    return GATEWAY_ID, 0, [], None
+    if not payload.use_account_quota:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "gateway_quota_required",
+                "message": "网关链路提交必须使用账号额度",
+            },
+        )
+    if not origin:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "gateway_identity_required",
+                "message": "网关链路提交时必须声明来源网关",
+            },
+        )
+    if not visited:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_link", "message": "链路信息不完整"},
+        )
+    bound = (account_row.get("bound_gateway_id") or "").strip()
+    if bound and visited[-1] != bound:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "gateway_mismatch",
+                "message": "直接上游网关与账号绑定不一致",
+            },
+        )
+    if origin not in visited:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "invalid_link",
+                "message": "来源网关必须出现在链路中",
+            },
+        )
+    if not client_request_id:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "client_request_required",
+                "message": "网关链路提交时必须提供 client_request_id",
+            },
+        )
+    if payload.hop < 1:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_link", "message": "链路跳数不正确"},
+        )
+    hop = int(payload.hop)
+    if hop > GATEWAY_MAX_HOPS:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "max_hops_exceeded",
+                "message": "链路跳数超过上限",
+            },
+        )
+    if GATEWAY_ID in visited:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "gateway_loop", "message": "检测到网关环路"},
+        )
+    if origin == GATEWAY_ID:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "gateway_loop", "message": "检测到网关环路"},
+        )
+    return origin, hop, visited, client_request_id
 
 
 def _task_public(task: dict[str, Any]) -> dict[str, Any]:
@@ -466,9 +458,6 @@ def gateway_info(request: Request) -> dict[str, Any]:
     current = resolve_account(request, db)
     if not current:
         raise HTTPException(status_code=401, detail="请先登录")
-    account = db.get_account_by_id(current["account_id"])
-    if not account or not account.get("is_gateway"):
-        raise HTTPException(status_code=403, detail="该账号不是网关账号")
     caps = default_capabilities(db)
     counts = db.queue_status()
     capacity = sum(

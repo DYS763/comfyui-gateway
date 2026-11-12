@@ -3128,11 +3128,11 @@ function renderAccountRows(items) {
     const nameCell = el("td", "admin-nowrap");
     nameCell.appendChild(el("span", "", item.username));
     if (item.is_gateway) {
-      const badge = el("span", "state-pill gateway", "网关");
+      const badge = el("span", "state-pill gateway", "上游");
       badge.style.marginLeft = "6px";
       badge.title = item.bound_gateway_id
-        ? `已绑定上游 ${item.bound_gateway_id}`
-        : "已标记为网关账号";
+        ? `已绑定上游 ${item.bound_gateway_id}（可选严格校验）`
+        : "已绑定上游";
       nameCell.appendChild(badge);
     }
     nameCell.title = item.account_id;
@@ -3199,7 +3199,7 @@ function renderAccountRows(items) {
     );
     wrap.appendChild(
       nodeActionButton(
-        item.is_gateway ? "取消网关账号" : "设为网关账号",
+        item.is_gateway ? "取消上游绑定" : "绑定上游网关",
         ["M12 3v18", "M3 12h18"],
         () => configureAccountGateway(item),
       ),
@@ -3276,14 +3276,14 @@ async function resetAccountPassword(item) {
 async function configureAccountGateway(item) {
   const message = document.querySelector("#account-message");
   if (item.is_gateway) {
-    if (!window.confirm(`取消「${item.username}」的网关账号标记？`)) return;
+    if (!window.confirm(`取消「${item.username}」的上游绑定？`)) return;
     try {
       await api(`/api/admin/accounts/${item.account_id}/gateway`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ is_gateway: false }),
       });
-      setMessage(message, "已取消网关账号标记");
+      setMessage(message, "已取消上游绑定");
       loadAccounts();
     } catch (error) {
       setMessage(message, error.message, true);
@@ -3291,7 +3291,7 @@ async function configureAccountGateway(item) {
     return;
   }
   const gatewayId = window.prompt(
-    "输入上游网关 ID（对方网关 /api/gateway/info 返回的 gateway_id）",
+    "输入上游网关 ID（对方 /api/gateway/info 返回的 gateway_id）。可选：绑定后只接受该上游的直接转发。",
     "",
   );
   if (gatewayId === null) return;
@@ -3308,7 +3308,7 @@ async function configureAccountGateway(item) {
         gateway_id: gatewayId.trim(),
       }),
     });
-    setMessage(message, "已设为网关账号");
+    setMessage(message, "已绑定上游网关");
     loadAccounts();
   } catch (error) {
     setMessage(message, error.message, true);
@@ -3334,7 +3334,7 @@ async function loadAccountDetail(item) {
     el(
       "span",
       "",
-      `ID ${item.account_id} · 注册 IP ${item.register_ip || "—"} · 状态 ${accountStatusLabel(item.status)} · 剩余额度（不含免费） ${remainingQuota} · 网关账号 ${item.is_gateway ? `（上游 ${item.bound_gateway_id || "未绑定"}）` : "否"}`,
+      `ID ${item.account_id} · 注册 IP ${item.register_ip || "—"} · 状态 ${accountStatusLabel(item.status)} · 剩余额度（不含免费） ${remainingQuota} · 上游绑定 ${item.bound_gateway_id || "未设置（可选）"}`,
     ),
   );
   detailNote.appendChild(copyButton("复制 ID", item.account_id));
