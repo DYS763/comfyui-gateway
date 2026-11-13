@@ -111,16 +111,13 @@ workflow = WorkflowTemplate(
     settings.negative_prompt_node_id,
 )
 try:
-    _default_lora = workflow.default_lora_filename()
+    _template_lora = workflow.default_lora_filename()
 except WorkflowError:
-    logger.exception("could not determine default LoRA from workflow")
-    _default_lora = None
-if _default_lora:
-    db.ensure_default_lora(
-        filename=_default_lora,
-        display_name=Path(_default_lora).stem,
-        created_at=utc_now(),
-    )
+    logger.exception("could not determine LoRA from workflow")
+    _template_lora = None
+if _template_lora:
+    # 旧版本会把工作流里的占位 LoRA 自动导入为默认值；现在默认不使用 LoRA。
+    db.remove_placeholder_default_lora(_template_lora)
 runner = JobRunner(
     db,
     comfy,
@@ -591,13 +588,8 @@ def submit(payload: SubmitRequest, request: Request) -> dict[str, Any]:
                     lora_filename = default_entry["filename"]
                     lora_name = default_entry["display_name"]
                 else:
-                    try:
-                        lora_filename = workflow.default_lora_filename()
-                    except WorkflowError:
-                        lora_filename = None
-                    lora_name = (
-                        Path(lora_filename).stem if lora_filename else None
-                    )
+                    lora_disabled = True
+                    lora_strength = None
         if payload.endpoint_id and payload.endpoint_id.strip():
             requested_endpoint_id = payload.endpoint_id.strip()
             requested_endpoint = db.get_endpoint(requested_endpoint_id)

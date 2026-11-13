@@ -2959,6 +2959,18 @@ class Database:
             ).fetchone()
             return dict(row) if row else None
 
+    def remove_placeholder_default_lora(self, filename: str) -> bool:
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                """
+                DELETE FROM lora_entries
+                WHERE filename = ? AND is_default = 1
+                  AND created_by = 'system' AND updated_by IS NULL
+                """,
+                (filename,),
+            )
+            return cursor.rowcount > 0
+
     def ensure_default_lora(
         self,
         *,

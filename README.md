@@ -68,7 +68,7 @@ ADMIN_PASSWORD=请改成强密码
 - `moss_image_sft_int8_convrot.safetensors`
 - `qwen3.5_9b_moss_image_sft_w4a8_gptq.safetensors`
 - `flux2-vae_small.safetensors`
-- `example_lora.safetensors`（占位文件名，不存在时会生成失败；不需要 LoRA 时请删除该节点或替换为实际文件）
+- `example_lora.safetensors`（占位文件名，仅用于让工作流保持完整的 LoRA 节点；未选择 LoRA 时该节点会被移除，不会加载）
 
 如果你的节点 ID 或模型不同，直接修改 `config/workflow.json` 和 `.env` 中的 `PROMPT_NODE_ID` / `NEGATIVE_PROMPT_NODE_ID`。
 
@@ -186,7 +186,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 19613
 2. 在「节点」页确认 ComfyUI 节点在线；默认节点来自 `COMFYUI_URL`。
 3. 在「密钥」页生成一次性密钥，或创建「超级密钥」。
 4. 在「邀请码」页创建邀请码，发给需要注册的用户。
-5. 在「LoRA」页添加可用 LoRA；工作流必须包含 LoRA 节点。
+5. 在「LoRA」页添加可用 LoRA；工作流必须包含 LoRA 节点。默认不使用 LoRA，用户可在前台选择已添加的条目。
 6. 在「系统」页配置自动清理开关。
 7. 在「公开画廊」页管理已发布作品、评论和举报。
 

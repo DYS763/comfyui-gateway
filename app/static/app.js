@@ -249,17 +249,21 @@ async function loadLoras() {
     const data = await response.json();
     const current = loraSelect.value;
     loraSelect.replaceChildren();
+    const defaultId = data.default_id ?? null;
     const defaultOption = element(
       "option",
       "",
-      `默认（${data.default_name || "默认"}）`,
+      defaultId === null
+        ? "不使用 LoRA"
+        : `默认（${data.default_name || "默认"}）`,
     );
-    defaultOption.value = "";
+    defaultOption.value = defaultId === null ? "none" : "";
     loraSelect.appendChild(defaultOption);
-    const noneOption = element("option", "", "不使用 LoRA");
-    noneOption.value = "none";
-    loraSelect.appendChild(noneOption);
-    const defaultId = data.default_id ?? null;
+    if (defaultId !== null) {
+      const noneOption = element("option", "", "不使用 LoRA");
+      noneOption.value = "none";
+      loraSelect.appendChild(noneOption);
+    }
     for (const item of Array.isArray(data.items) ? data.items : []) {
       if (defaultId !== null && Number(item.id) === Number(defaultId)) continue;
       const option = element("option");
@@ -270,16 +274,17 @@ async function loadLoras() {
     const stillExists = Array.from(loraSelect.options).some(
       (option) => option.value === current,
     );
-    loraSelect.value = stillExists ? current : "";
+    loraSelect.value = stillExists
+      ? current
+      : defaultId === null
+        ? "none"
+        : "";
     syncLoraStrength();
   } catch (error) {
     loraSelect.replaceChildren();
-    const defaultOption = element("option", "", "默认（默认）");
-    defaultOption.value = "";
+    const defaultOption = element("option", "", "不使用 LoRA");
+    defaultOption.value = "none";
     loraSelect.appendChild(defaultOption);
-    const noneOption = element("option", "", "不使用 LoRA");
-    noneOption.value = "none";
-    loraSelect.appendChild(noneOption);
     syncLoraStrength();
   }
 }
